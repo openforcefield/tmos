@@ -3,15 +3,15 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to Trasition Metal Oxidation State's documentation!
+Welcome to Transition Metal Oxidation State's documentation!
 =========================================================
 
 .. grid:: 1 1 2 2
 
     .. grid-item-card:: Getting Started
       :margin: 0 3 0 0
-      
-      Learn the basics of using Trasition Metal Oxidation State.
+
+      Learn the basics of using Transition Metal Oxidation State.
 
       .. button-link:: ./getting_started.html
          :color: primary
@@ -20,11 +20,11 @@ Welcome to Trasition Metal Oxidation State's documentation!
 
          To the Getting Started Guide
 
-      
+
 
     .. grid-item-card::  User Guide
       :margin: 0 3 0 0
-      
+
       An in-depth guide for users.
 
       .. button-link:: ./user_guide.html
@@ -33,13 +33,13 @@ Welcome to Trasition Metal Oxidation State's documentation!
          :expand:
 
          To the User Guide
-      
-      
+
+
 
     .. grid-item-card:: API Reference
       :margin: 0 3 0 0
-      
-      How to use the API of Trasition Metal Oxidation State.
+
+      How to use the API of Transition Metal Oxidation State.
 
       .. button-link:: ./api.html
          :color: primary
@@ -48,12 +48,12 @@ Welcome to Trasition Metal Oxidation State's documentation!
 
          To the API Reference.
 
-      
+
 
     .. grid-item-card::  Developer Guide
       :margin: 0 3 0 0
-      
-      How to contribute to Trasition Metal Oxidation State.
+
+      How to contribute to Transition Metal Oxidation State.
 
       .. button-link:: ./developer_guide.html
          :color: primary
@@ -72,4 +72,3 @@ Welcome to Trasition Metal Oxidation State's documentation!
    user_guide
    api
    developer_guide
-
