@@ -43,7 +43,6 @@ METALS_NUM = [
     79,
     80,
 ]
-MetalNon_Hg = "[#3,#11,#12,#19,#13,#21,#22,#23,#24,#25,#26,#27,#28,#29,#30,#39,#40,#41,#42,#43,#44,#45,#46,#47,#48,#57,#72,#73,#74,#75,#76,#77,#78,#79,#80]~[B,#6,#14,#15,#33,#51,#16,#34,#52,Cl,Br,I,#85]"
 bond_order_dict = {
     "SINGLE": 1,
     "DOUBLE": 2,
@@ -59,10 +58,6 @@ bond_type_dict = {
     3: Chem.BondType.TRIPLE,
 }
 pt = GetPeriodicTable()
-params = Chem.MolStandardize.rdMolStandardize.MetalDisconnectorOptions()
-params.splitAromaticC = True
-params.splitGrignards = True
-params.adjustCharges = False
 
 
 def get_atom_charge(atom):
@@ -84,10 +79,10 @@ def get_atom_charge(atom):
     charge = sum(bond_orders) - Ntotalbonds
     charge = charge[np.where(np.min(np.abs(charge)) == np.abs(charge))[0]]
     if len(charge) > 1:
-        if atom.HasProp("__origIdx"):
+        if atom.HasProp("__original_index"):
             raise ValueError(
                 f"Atom {atom.GetSymbol()}, Ligand Index: {atom.GetIdx()}, Complex Index: "
-                f"{atom.GetIntProp('__origIdx')}, can have multiple charge states {charge}"
+                f"{atom.GetIntProp('__original_index')}, can have multiple charge states {charge}"
             )
         else:
             raise ValueError(
@@ -415,7 +410,7 @@ def _correct_ferrocene(mol, index):
     mol = Chem.AddHs(mol, addCoords=True, explicitOnly=False, onlyOnAtoms=c_atoms)
 
     for a in mol.GetAtoms():
-        a.SetIntProp("__origIdx", a.GetIdx())
+        a.SetIntProp("__original_index", a.GetIdx())
         if a.GetAtomicNum() in METALS_NUM:
             # tm_atom = a.GetSymbol()
             new_index = a.GetIdx()
@@ -505,6 +500,68 @@ def fix_missing_coords(mol, tmc_idx, missing_coord_indices):
     ff.Minimize(maxIts=200000)
 
 
+def find_metal_index(mol):
+    """Find the molecule index for the metal
+
+    Args:
+        mol (rdkit.Chem.rdchem.Mol): Transition state complex
+
+    Raises:
+        ValueError: No transition metal found
+
+    Returns:
+        int: Index of transition metal
+    """
+    tmc_idx = None
+    for a in mol.GetAtoms():
+        a.SetNoImplicit(True)
+        if a.GetAtomicNum() in METALS_NUM:
+            tmc_idx = a.GetIdx()
+    if tmc_idx is None:
+        raise ValueError("No transition metal found")
+    return tmc_idx
+
+
+def cleave_mol_from_index(mol, index, verbose=False):
+    """Given an atomic index of an RDKit molecule, cleave the attaching bonds and return the resulting molecules
+
+    The original atom index that corresponds to the output, `coordinating_atoms`, can be accessed with the atom
+    int property, "__original_index".
+
+    Args:
+        mol (rdkit.Chem.rdchem.Mol): RDKit molecule
+        index (int): Index of atom to cleave from neighbors
+        verbose (bool, optional): If True, provide the number of resulting rdkit molecules. Defaults to False.
+
+    Returns:
+        fragments (list[rdkit.Chem.rdchem.Mol]): List of RDKit molecules resulting from cleaved bonds
+        coordinating_atoms (list[int]): List of atom indices that were connected to the central atom
+
+    """
+
+    params = Chem.MolStandardize.rdMolStandardize.MetalDisconnectorOptions()
+    params.splitAromaticC = True
+    params.splitGrignards = True
+    params.adjustCharges = False
+
+    MetalsOfInterest = "[#3,#11,#12,#19,#13,#21,#22,#23,#24,#25,#26,#27,#28,#29,#30,#39,#40,#41,#42,#43,#44,#45,#46,#47,#48,#57,#72,#73,#74,#75,#76,#77,#78,#79,#80]~[B,#6,#14,#15,#33,#51,#16,#34,#52,Cl,Br,I,#85]"
+
+    coordinating_atoms = [
+        int(x) for x in np.nonzero(Chem.rdmolops.GetAdjacencyMatrix(mol)[index, :])[0]
+    ]
+    for a in mol.GetAtoms():
+        a.SetIntProp("__original_index", a.GetIdx())
+
+    mdis = rdMolStandardize.MetalDisconnector(params)
+    mdis.SetMetalNon(Chem.MolFromSmarts(MetalsOfInterest))
+    frags = mdis.Disconnect(mol)
+    frag_mols = rdmolops.GetMolFrags(frags, asMols=True, sanitizeFrags=False)
+    if verbose:
+        print(f"Along with the metal, there are {len(frag_mols)-1} ligands")
+
+    return frag_mols, coordinating_atoms
+
+
 def sanitize_complex(mol, overall_charge, verbose=False, value_missing_coord=0):
     """Separate Ligands from transition metal and determine appropriate charge
 
@@ -521,22 +578,15 @@ def sanitize_complex(mol, overall_charge, verbose=False, value_missing_coord=0):
     Returns:
         tm_info (tuple(rdkit.Chem.rdchem.Mol, int)): An RDKit Molecule of the transition metal center and it's formal charge
         ligand_info (list(tuple(rdkit.Chem.rdchem.Mol, int))): A list of ligands where each entry is composed of an
-        RDKit Molecule of the ligand, its formal charge, number of handing bonds, and charged atom information as defined in
+        RDKit Molecule of the ligand, its formal charge, number of hanging bonds, and charged atom information as defined in
         :func:`assess_atoms`
-        mol (rdkit.Chem.rdchem.Mol): Customly sanitized ligand molecule
+        mol (rdkit.Chem.rdchem.Mol): Custom sanitized ligand molecule
     """
     tm_ox = None
     mol = Chem.DeleteSubstructs(mol, Chem.MolFromSmarts("[#0]"))
     Chem.AddHs(mol, addCoords=True, explicitOnly=False)
 
-    tmc_idx = None
-    for a in mol.GetAtoms():
-        a.SetIntProp("__origIdx", a.GetIdx())
-        a.SetNoImplicit(True)
-        if a.GetAtomicNum() in METALS_NUM:
-            tmc_idx = a.GetIdx()
-    if tmc_idx is None:
-        raise ValueError("No transition metal found")
+    tmc_idx = find_metal_index(mol)
 
     # Detect and correct special cases
     if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene
@@ -547,16 +597,7 @@ def sanitize_complex(mol, overall_charge, verbose=False, value_missing_coord=0):
         raise ValueError("Molecule missing coordinates")
     #    mol = fix_missing_coords(mol, tmc_idx, missing_coord_indices)
 
-    coordinating_atoms = np.nonzero(Chem.rdmolops.GetAdjacencyMatrix(mol)[tmc_idx, :])[
-        0
-    ]
-
-    mdis = rdMolStandardize.MetalDisconnector(params)
-    mdis.SetMetalNon(Chem.MolFromSmarts(MetalNon_Hg))
-    frags = mdis.Disconnect(mol)
-    frag_mols = rdmolops.GetMolFrags(frags, asMols=True, sanitizeFrags=False)
-    if verbose:
-        print(f"Along with the metal, there are {len(frag_mols)-1} ligands")
+    frag_mols, coordinating_atoms = cleave_mol_from_index(mol, tmc_idx, verbose=verbose)
 
     total_lig_bonds = 0
     total_lig_charge = 0
@@ -583,7 +624,7 @@ def sanitize_complex(mol, overall_charge, verbose=False, value_missing_coord=0):
                 charged_atoms[a.GetIdx()]["charge"]
                 for a in m.GetAtoms()
                 if (
-                    a.GetIntProp("__origIdx") in coordinating_atoms
+                    a.GetIntProp("__original_index") in coordinating_atoms
                     and a.GetIdx() in charged_atoms
                 )
             ]
@@ -622,7 +663,7 @@ def reform_metal_complex(tm_info, lig_info, coordinating_atoms, verbose=True):
         RDKit Molecule of the ligand, its formal charge, number of handing bonds, and charged atom information as defined in
         :func:`assess_atoms`
         coordinating_atoms (list[int]): List of atom indices that were connected to the metal center in the original complex,
-        as determined from a custom set atom property, "__origIdx"
+        as determined from a custom set atom property, "__original_index"
         verbose (bool, optional): Print updates. Defaults to True.
     """
     # Reform complex with ligands
@@ -636,7 +677,7 @@ def reform_metal_complex(tm_info, lig_info, coordinating_atoms, verbose=True):
     coordinating_atoms_idx = [
         a.GetIdx()
         for a in tmc_mol.GetAtoms()
-        if a.GetIntProp("__origIdx") in coordinating_atoms
+        if a.GetIntProp("__original_index") in coordinating_atoms
     ]
     tm_idx = [a.GetIdx() for a in tmc_mol.GetAtoms() if a.GetSymbol() == tm_symbol][0]
 
