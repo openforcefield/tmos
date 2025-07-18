@@ -63,6 +63,24 @@ def get_atom_environment(graph, atom_idx):
     return (symbol, degree, tuple(neighbor_symbols))
 
 
+def implicit_hydrogen_atom_mapping(mol):
+    """Map atom indices to indices in implicit molecule case.
+
+    Args:
+        mol1 (rdkit.Chem.rdchem.Mol): RDKit molecule
+
+    Returns:
+        Dictionary mapping original atom indices to atom indices for molecule with implicit hydrogen atoms.
+    """
+    atom_mapping = defaultdict()
+    i = 0
+    for atm in mol.GetAtoms():
+        if atm.GetSymbol() != "H":
+            atom_mapping[atm.GetIdx()] = i
+            i += 1
+    return atom_mapping
+
+
 def find_atom_mapping(mol1, mol2):
     """
     Find mapping between atoms in original and correct molecule graphs using
