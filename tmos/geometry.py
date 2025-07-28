@@ -1,83 +1,8 @@
+import warnings
+
 import numpy as np
 
-ideal_angles = {
-    3: {  # 3 angles
-        "Trigonal Planar": np.array([120, 120, 120]),
-        "Trigonal Pyramidal": np.array([107, 107, 107]),
-        "T-Shaped": np.array([90, 90, 180]),
-    },
-    4: {  # 6 angles
-        "Square Planar": np.array([90, 90, 90, 90, 180, 180]),
-        "Tetrahedral": np.array([109.5, 109.5, 109.5, 109.5, 109.5, 109.5]),
-        "Disphenoidal": np.array([90, 90, 90, 90, 120, 180]),
-    },
-    5: {  # 10 angles
-        "Square Pyramidal": np.array([90, 90, 90, 90, 90, 90, 90, 90, 180, 180]),
-        "Trigonal Bipyramidal": np.array([90, 90, 90, 90, 90, 90, 120, 120, 120, 180]),
-        "Pentagonal Planar": np.array([72, 72, 72, 72, 72, 144, 144, 144, 144, 144]),
-    },
-    6: {  # 15 angles
-        "Octahedral": np.array(
-            [90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 180, 180, 180]
-        ),
-        "Trigonal Prismatic": np.array(
-            [60, 60, 60, 60, 60, 60, 90, 90, 90, 120, 120, 120, 150, 150, 150]
-        ),
-        #        "Pentagonal Pyramidal": np.array([72, 72, 72, 72, 72, 90, 90, 90, 90, 90, 144, 144, 144, 144, 144]),
-    },
-    7: {  # 21 angles
-        "Pentagonal Bipyamidal": np.array(
-            [
-                72,
-                72,
-                72,
-                72,
-                72,
-                90,
-                90,
-                90,
-                90,
-                90,
-                90,
-                90,
-                90,
-                90,
-                90,
-                144,
-                144,
-                144,
-                144,
-                144,
-                180,
-            ]
-        ),
-        "Capped Trigonal Prism": np.array(
-            [
-                60,
-                60,
-                60,
-                60,
-                60,
-                60,
-                90,
-                90,
-                90,
-                90,
-                90,
-                90,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-            ]
-        ),
-    },
-}
+from .reference_values import ideal_angles
 
 
 def get_coordinates(mol, index):
@@ -109,7 +34,9 @@ def get_distance(mol, ind1, ind2):
     return np.linalg.norm(get_coordinates(mol, ind1) - get_coordinates(mol, ind2))
 
 
-def get_geometry_from_xyz(positions, central_idx, r_cut=2.5, tol=15, verbose=False):
+def get_geometry_from_xyz(
+    positions, central_idx, r_cut=2.5, tol=15, verbose=False, ignore_scale=False
+):
     """Determine the bonded geometry of a central atom based on atomic positions from xyz coordinates.
 
     Args:
@@ -118,6 +45,8 @@ def get_geometry_from_xyz(positions, central_idx, r_cut=2.5, tol=15, verbose=Fal
         r_cut (float, optional): Distance cutoff to filter neighboring atoms. Defaults to 2 Angstroms.
         tol (float, optional): Tolerance for angle comparison in degrees. Defaults to 15.
         verbose (bool, optional): If True, prints additional debugging information. Defaults to False.
+        ignore_scale (bool, optional): If True, the warning that the minimum bond is not between 0.8 and 1.5
+        Å is ignored.
 
     Returns:
         str: The determined geometry of the central atom, or an empty string if undetermined.
@@ -125,6 +54,14 @@ def get_geometry_from_xyz(positions, central_idx, r_cut=2.5, tol=15, verbose=Fal
 
     central_pos = positions[central_idx]
     dist = np.linalg.norm(positions - central_pos, axis=-1)
+    dist[dist == 0] = np.nan
+    if (np.nanmin(dist) < 0.8 or np.nanmin(dist) > 1.5) and not ignore_scale:
+        raise ValueError(
+            f"Bond distances are peculiar for coordinates in Å. Min distance is {np.nanmin(dist)}. "
+            "If the coordinate scale is intentional, consider setting `ignore_scale==True` and adjusting"
+            " `r_cut`"
+        )
+
     positions = np.array(positions[np.where(np.logical_and(dist < r_cut, dist > 0))[0]])
     positions -= np.array(central_pos)
 
@@ -138,7 +75,13 @@ def get_geometry_from_xyz(positions, central_idx, r_cut=2.5, tol=15, verbose=Fal
         for j in range(i + 1, len(positions)):
             v1, v2 = positions[i], positions[j]
             angle = np.degrees(
-                np.arccos(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+                np.arccos(
+                    np.clip(
+                        np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)),
+                        -1.0,
+                        1.0,
+                    )
+                )
             )
             angles.append(angle)
     angles = np.sort(np.array(angles))
@@ -200,13 +143,18 @@ def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
         for j in range(i + 1, len(positions)):
             v1, v2 = positions[i], positions[j]
             angle = np.degrees(
-                np.arccos(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+                np.arccos(
+                    np.clip(
+                        np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)),
+                        -1.0,
+                        1.0,
+                    )
+                )
             )
             angles.append(angle)
     angles = np.sort(np.array(angles))
     avg_angle = np.mean(angles)
     n = len(neighbors)
-
     # Heuristic classification
     if n == 2:
         if np.allclose(avg_angle, 180, atol=tol):
@@ -224,7 +172,7 @@ def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
         if verbose:
             print(scores)
         if scores[geometry] > tol:
-            print(
+            warnings.warn(
                 f"This {n}-coordinate center is closest to {geometry} but not within tolerance."
             )
             return "Undetermined"
