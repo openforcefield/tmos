@@ -3,6 +3,13 @@
 import traceback
 from collections import defaultdict
 
+import py3Dmol
+
+from rdkit import Chem
+from rdkit.Chem.Draw import IPythonConsole
+
+IPythonConsole.molSize = 500, 500
+
 
 def first_traceback(keyword="During handling of the above exception"):
     """Isolate the first error in the traceback that caused the issue.
@@ -48,3 +55,52 @@ def get_molecular_formula(mol, make_hydrogens_implicit=False):
         del comp["H"]
     formula = "".join([str(x) for k, val in comp.items() for x in [k, val]])
     return formula
+
+
+def view3D(molecule, labels=False, kekulize=True):
+    """
+    Format 3D view of an RDKit molecule.
+
+    Parameters
+    ----------
+    molecule : rdkit.Chem.rdchem.Mol
+        RDKit molecule to be viewed.
+    labels : bool, optional
+        If True, atom indices will be displayed as labels. Default is False.
+    kekulize : bool, optional
+        If True, kekulize the molecule before rendering. Default is True.
+
+    Returns
+    -------
+    py3Dmol.view
+        3Dmol.js view object for visualization.
+    """
+    if molecule is None:
+        return None
+    mol = Chem.Mol(molecule)
+    view = py3Dmol.view(
+        data=Chem.MolToMolBlock(
+            mol, kekulize=kekulize
+        ),  # Convert the RDKit molecule for py3Dmol
+        style={"stick": {}, "sphere": {"scale": 0.3}},
+    )
+
+    # Add atom labels (indices)
+    if labels:
+        if mol.GetNumConformers() == 0:
+            raise ValueError(
+                "Cannot add 3D model labels without conformer coordinates."
+            )
+        for i, atom in enumerate(mol.GetAtoms()):
+            pos = mol.GetConformer().GetAtomPosition(i)
+            view.addLabel(
+                str(i),
+                {
+                    "position": {"x": pos.x, "y": pos.y, "z": pos.z},
+                    "backgroundColor": "white",
+                    "backgroundOpacity": 0.2,
+                    "fontColor": "black",
+                },
+            )
+
+    return view
