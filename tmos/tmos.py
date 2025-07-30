@@ -25,38 +25,51 @@ RDLogger.DisableLog("rdApp.*")
 pt = GetPeriodicTable()
 
 
-def sanitize_molecule(mol, update_charges=True):
+def sanitize_molecule(
+    mol, update_charges=True, sanitize_aromaticity=False, sanitize_kekulize=False
+):
     """Sanitize TMC molecule by updating formal charges to apparent value based on connectivity and use
-    RDKit sanitization without SANITIZE_SETAROMATICITY.
+    RDKit sanitization without SANITIZE_SETAROMATICITY or SANITIZE_KEKULIZE.
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule to sanitize
-    update_charges : bool, optional
-        If True, the charges are updated to apparent values based on connectivity, by default True
+    update_charges : bool, optional, default=True
+        If True, the charges are updated to apparent values based on connectivity
+    sanitize_aromaticity : bool, options, default=False
+        If False, removes the flag ``Chem.SanitizeFlags.SANITIZE_SETAROMATICITY``
+    sanitize_kekulize : bool, options, default=False
+        If False, removes the flag ``Chem.SanitizeFlags.SANITIZE_KEKULIZE``
     """
 
     if update_charges:
         brd.update_formal_charges(mol)
+    sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL
+    if not sanitize_aromaticity:
+        sanitize_ops ^= (
+            Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
+        )  # Needed for porphyrins
+    if not sanitize_kekulize:  # Should be True for porphyrins
+        sanitize_ops ^= Chem.SanitizeFlags.SANITIZE_KEKULIZE
     Chem.SanitizeMol(
         mol,
-        sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
-        ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY,  # Needed for porphyrins
+        sanitizeOps=sanitize_ops,
     )
 
 
-def mol_from_smiles(smiles, update_charges=False, sanitize=False):
+def mol_from_smiles(smiles, sanitize=False, sanitize_kwargs={}):
     """Convert a SMILES string into a RDKit Molecule
 
     Parameters
     ----------
     smiles : str
         SMILES string
-    update_charges : bool, optional
-        If sanitize is True, allow atomic formal charges to be updated according to the atomic connectivity, by default False
     sanitize : bool, optional
         Perform sanitization with :func:`sanitize_molecule`, by default False
+    sanitize_kwargs : dict, optional, default={}
+        Keywords for :func:`sanitize_molecule`.
+
 
     Returns
     -------
@@ -65,7 +78,7 @@ def mol_from_smiles(smiles, update_charges=False, sanitize=False):
     """
     mol = Chem.MolFromSmiles(smiles, sanitize=False)
     if sanitize:
-        sanitize_molecule(mol, update_charges=update_charges)
+        sanitize_molecule(mol, **sanitize_kwargs)
     return mol
 
 
@@ -306,7 +319,9 @@ def sanitize_ligand(
         brd.add_obvious_bonds(mol_after)
         if sanitize:
             try:
-                sanitize_molecule(mol_after)
+                sanitize_molecule(
+                    mol_after, sanitize_kekulize=True
+                )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
             except Chem.rdchem.AtomValenceException:
                 warnings.warn("RDKit sanitize failed, passing molecule as is.")
 
@@ -337,6 +352,9 @@ def get_ligand_attributes(
 
         - "index" (int): Index of the ligand prospect.
         - "rdmol" (rdkit.Chem.rdchem.Mol): Resolved ligand molecule.
+        - "smiles": Canonical explicit hydrogen smiles string generated from the RDKit molecule
+                    of the complex. Note that the dummy atom type is present to denote where the metal
+                    attaches; commonly I.
         - "total_charge" (int): Total charge of the ligand.
         - "hanging_bonds" (int): Number of unused valencies.
         - "charged_atoms" (dict): Atom information by index as defined in :func:`tmos.build_rdmol.assess_atoms`.
@@ -450,6 +468,7 @@ def get_ligand_attributes(
             print(f"    {x}: {y}")
 
     sanitize_molecule(ligand_best["rdmol"])
+    ligand_best["smiles"] = mol_to_smiles(ligand_best["rdmol"])
 
     return ligand_best
 
@@ -823,6 +842,9 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
                 - "number_electrons": Electron count for the metal center.
             - "ligand_info": list of dict
                 List of ligand information dictionaries, each with keys:
+                    - "smiles": Canonical explicit hydrogen smiles string generated from the RDKit molecule
+                                of the complex. Note that the dummy atom type is present to denote where the
+                                metal attaches; commonly I.
                     - "rdmol": RDKit molecule of the ligand.
                     - "total_charge": Total charge of the ligand.
                     - "hanging_bonds": Number of unused valencies.
@@ -830,6 +852,7 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
                     - "L-type connectors": List of original atom indices for L-type connectors.
                     - "X-type connectors": List of original atom indices for X-type connectors.
             - "complex_info": dict with keys:
+                - "smiles": Canonical explicit hydrogen smiles string generated from the RDKit molecule of the complex
                 - "rdmol": RDKit molecule of the reformed transition metal complex.
                 - "oxidation_state": Oxidation state of the metal center.
                 - "total_charge": Overall charge of the complex.
@@ -916,6 +939,7 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
             },
             "ligand_info": lig_info,
             "complex_info": {
+                "smiles": mol_to_smiles(tmc_mol),
                 "rdmol": tmc_mol,
                 "oxidation_state": tm_ox,
                 "total_charge": charge,
