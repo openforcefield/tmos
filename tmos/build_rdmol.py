@@ -19,6 +19,7 @@ from rdkit import Chem
 from rdkit.Geometry import Point3D
 from rdkit.Chem import GetPeriodicTable
 from rdkit.Chem.rdDetermineBonds import DetermineBondOrders
+from rdkit import RDLogger
 
 import periodictable
 from MDAnalysis.converters.RDKitInferring import MDAnalysisInferrer
@@ -47,6 +48,7 @@ from .reference_values import (
     METALS_NUM,
 )
 
+RDLogger.DisableLog("rdApp.*")
 pt = GetPeriodicTable()
 
 #############################################################################
@@ -252,7 +254,7 @@ def copy_atom_coords(mol1, index1, mol2, index2, confId1=0, confId2=0):
 #############################################################################
 
 
-def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True):
+def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_tolerance=0.1):
     """
     Convert a QCElemental molecule to an RDKit molecule.
 
@@ -262,6 +264,8 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True):
         The QCElemental molecule object
     use_connectivity : bool
         Whether to use existing connectivity information if available
+    distance_tolerance : float, optional, default=0.1
+        Additional tolerance for bond distance cutoffs (Angstroms) in :func:`determine_connectivity`
 
     Returns:
     --------
@@ -272,7 +276,9 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True):
     mol = Chem.RWMol()
     for i, symbol in enumerate(qcel_molecule.symbols):
         atom = Chem.Atom(symbol)
+        atom.SetNoImplicit(True)
         mol.AddAtom(atom)
+    mol.UpdatePropertyCache(strict=False)
 
     # Set 3D coordinates
     if qcel_molecule.geometry is not None:
@@ -294,10 +300,61 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True):
                 bond_order = 1
 
             mol.AddBond(atom1_idx, atom2_idx, bond_type_dict[bond_order])
+    else:
+        mol = determine_connectivity(mol, distance_tolerance=distance_tolerance)
+
+    mol.UpdatePropertyCache(strict=False)
 
     mol = mol.GetMol()
     try:
         Chem.SanitizeMol(mol)
+    except Exception:  # Doesn't always work for metal complexes
+        pass
+
+    return mol
+
+
+def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1):
+    """
+    Convert a QCElemental molecule to an RDKit molecule.
+
+    Parameters:
+    -----------
+    symbols : list[str]
+        List of element symbols
+    positions : numpy.ndarray
+        Matrix of the same length as ``symbols`` with x, y, and z coordinates in Angstroms
+    distance_tolerance : float, optional, default=0.1
+        Additional tolerance for bond distance cutoffs (Angstroms) in :func:`determine_connectivity`
+
+    Returns:
+    --------
+    rdkit.Chem.Mol
+        RDKit molecule object
+    """
+
+    mol = Chem.RWMol()
+    for i, symbol in enumerate(symbols):
+        atom = Chem.Atom(symbol)
+        atom.SetNoImplicit(True)
+        mol.AddAtom(atom)
+
+    # Set 3D coordinates
+    conformer = Chem.Conformer(len(symbols))
+    for i, pos in enumerate(positions):
+        conformer.SetAtomPosition(i, Point3D(*pos))
+    mol.AddConformer(conformer)
+
+    mol.UpdatePropertyCache(strict=False)
+    mol = mol.GetMol()
+    mol = determine_connectivity(mol, distance_tolerance=distance_tolerance)
+    mol.UpdatePropertyCache(strict=False)
+    try:
+        Chem.SanitizeMol(
+            mol,
+            sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
+            ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY,  # Needed for porphyrins
+        )
     except Exception:  # Doesn't always work for metal complexes
         pass
 
@@ -461,6 +518,8 @@ def determine_bonds_mda(mol, verbose=False):
     """
     mol = copy.deepcopy(mol)
     mol.UpdatePropertyCache(strict=False)
+    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
+        raise ValueError("Provided molecule has implicit hydrogen atoms.")
     totalcharge, _, charged_atoms_before = assess_atoms(mol)
     rings = find_molecular_rings(mol_to_graph(mol), min_ring_size=6, max_ring_size=6)
 
@@ -480,7 +539,7 @@ def determine_bonds_mda(mol, verbose=False):
             bond.SetBondType(bond_type_dict[1.5])
 
     try:
-        mol = Chem.RWMol(Chem.AddHs(mol, addCoords=True, explicitOnly=True))
+        mol = Chem.RWMol(mol)
         MolBondInferrer = MDAnalysisInferrer(max_iter=2000)
         mol = MolBondInferrer(mol)
         _, _, charged_atoms_after = assess_atoms(mol)
@@ -520,7 +579,9 @@ def determine_bonds_rdkit(mol, charge=0, verbose=False):
     """
     mol = copy.deepcopy(mol)
     mol.UpdatePropertyCache(strict=False)
-    mol = Chem.RWMol(Chem.AddHs(mol, addCoords=True, explicitOnly=True))
+    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
+        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+    mol = Chem.RWMol(mol)
     try:
         DetermineBondOrders(
             mol, charge=charge, maxIterations=1000, allowChargedFragments=False
@@ -559,7 +620,10 @@ def determine_bonds_openbabel(mol, return_implicit_Hs=False, verbose=False):
     """
     mol = copy.deepcopy(mol)
     mol.UpdatePropertyCache(strict=False)
-    mol = Chem.RWMol(Chem.AddHs(mol, addCoords=True, explicitOnly=True))
+    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
+        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+    mol = Chem.RWMol(mol)
+    mol.UpdatePropertyCache(strict=False)
     try:
         mol_no_H = Chem.RemoveHs(mol)  # PerceiveBondOrders requires implicit Hs
     except Chem.rdchem.AtomValenceException:
