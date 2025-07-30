@@ -1,11 +1,17 @@
 Transition Metal Oxidation State
 ==============================
 [//]: # (Badges)
-[![GitHub Actions Build Status](https://github.com/REPLACE_WITH_OWNER_ACCOUNT/tmos/workflows/CI/badge.svg)](https://github.com/REPLACE_WITH_OWNER_ACCOUNT/tmos/actions?query=workflow%3ACI)
-[![codecov](https://codecov.io/gh/REPLACE_WITH_OWNER_ACCOUNT/Transition Metal Oxidation State/branch/main/graph/badge.svg)](https://codecov.io/gh/REPLACE_WITH_OWNER_ACCOUNT/Transition Metal Oxidation State/branch/main)
+[![GitHub Actions Build Status](https://github.com/openforcefield/tmos/workflows/CI/badge.svg)](https://github.com/openforcefield/tmos/actions?query=workflow%3ACI)
 
 
-Python script to determine the oxidation state of a metal complex
+This package provides tools for analyzing and determining the oxidation state of transition metal complexes from molecular representations. The core functionality is provided by the [`sanitize_complex`](tmos/sanitize.py#L1) function, which processes a molecular structure and outputs a sanitized version suitable for oxidation state assignment.
+
+Key utilities in the [`tmos/utils`](tmos/utils) directory include:
+- [`mol_to_smiles`](tmos/utils/smiles.py#L1): Converts molecular objects to SMILES strings for easy representation and interoperability.
+- [`mol_from_smiles`](tmos/utils/smiles.py#L20): Generates molecular objects from SMILES strings, enabling flexible input formats.
+- Additional helper functions for molecular manipulation and data handling.
+
+Together, these tools enable automated, reproducible workflows for transition metal chemistry analysis.
 
 ### Copyright
 
