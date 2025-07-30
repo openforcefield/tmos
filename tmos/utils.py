@@ -2,13 +2,42 @@
 
 import traceback
 from collections import defaultdict
+import json
 
+import numpy as np
 import py3Dmol
 
 from rdkit import Chem
 from rdkit.Chem.Draw import IPythonConsole
 
 IPythonConsole.molSize = 500, 500
+
+
+def save_to_json(result, filename, indent=4):
+    """Save result dictionary to a json file, with RDKit Molecules removed
+
+    Parameters
+    ----------
+    result : dict
+        Dictionary output of functions such as :func:`sanitize_complex`
+    filename : str
+        filename of output file
+    indent : int, optional, default=4
+        Indentation of json file
+    """
+
+    def remove_rdmol(obj):
+        if isinstance(obj, dict):
+            return {k: remove_rdmol(v) for k, v in obj.items() if k != "rdmol"}
+        elif isinstance(obj, list):
+            return [remove_rdmol(item) for item in obj]
+        elif isinstance(obj, (np.integer,)):
+            return int(obj)
+        else:
+            return obj
+
+    with open(filename, "w") as f:
+        json.dump(remove_rdmol(result), f, indent=indent)
 
 
 def first_traceback(keyword="During handling of the above exception"):
