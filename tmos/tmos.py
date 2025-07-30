@@ -14,12 +14,14 @@ from rdkit import Chem
 from rdkit.Chem import GetPeriodicTable, rdmolops
 from rdkit.Chem.MolStandardize import rdMolStandardize
 from rdkit.Geometry import Point3D
+from rdkit import RDLogger
 
 from .utils import get_molecular_formula
 from . import build_rdmol as brd
 from .reference_values import bond_type_dict, METALS_NUM, expected_oxidation_states
 from .geometry import get_geometry_from_mol
 
+RDLogger.DisableLog("rdApp.*")
 pt = GetPeriodicTable()
 
 
@@ -139,17 +141,20 @@ def check_ligand_exception(mol):
     dummy_atoms = [
         atm for atm in mol.GetAtoms() if atm.GetIntProp("__original_index") == -1
     ]
-    bond = dummy_atoms[0].GetBonds()[0]
-    other_atom = (
-        bond.GetBeginAtom()
-        if bond.GetEndAtom().GetIdx() == dummy_atoms[0].GetIdx()
-        else bond.GetEndAtom()
-    )
-    other_idx = other_atom.GetIdx()
-    metal_connected_orig_indices = [other_atom.GetIntProp("__original_index")]
-    mol.UpdatePropertyCache(strict=False)
-    for atm in sorted(dummy_atoms, key=lambda x: -x.GetIdx()):
-        mol.RemoveAtom(atm.GetIdx())
+    if dummy_atoms:
+        bond = dummy_atoms[0].GetBonds()[0]
+        other_atom = (
+            bond.GetBeginAtom()
+            if bond.GetEndAtom().GetIdx() == dummy_atoms[0].GetIdx()
+            else bond.GetEndAtom()
+        )
+        other_idx = other_atom.GetIdx()
+        metal_connected_orig_indices = [other_atom.GetIntProp("__original_index")]
+        mol.UpdatePropertyCache(strict=False)
+        for atm in sorted(dummy_atoms, key=lambda x: -x.GetIdx()):
+            mol.RemoveAtom(atm.GetIdx())
+    else:
+        metal_connected_orig_indices = []
 
     formula = get_molecular_formula(mol)
     smiles = {  # Exceptions
@@ -264,7 +269,9 @@ def sanitize_ligand(
     """
     mol_after = copy.deepcopy(mol)
     mol_after.UpdatePropertyCache(strict=False)
-    mol_after = Chem.RWMol(Chem.AddHs(mol_after, addCoords=True, explicitOnly=True))
+    if any(atm.GetNumImplicitHs() > 0 for atm in mol_after.GetAtoms()):
+        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+    mol_after = Chem.RWMol(mol_after)
 
     if wipe:
         mol_after = wipe_molecule(mol_after)
@@ -523,7 +530,7 @@ def correct_ferrocene(mol, index):
         if carbon.GetDegree() < 4:
             carbon.SetNumExplicitHs(1)
         carbon.UpdatePropertyCache(strict=False)
-    mol = Chem.AddHs(mol, addCoords=True, explicitOnly=False, onlyOnAtoms=c_atoms)
+    mol = Chem.AddHs(mol, addCoords=True, explicitOnly=True, onlyOnAtoms=c_atoms)
 
     for a in mol.GetAtoms():
         a.SetIntProp("__original_index", a.GetIdx())
@@ -832,10 +839,8 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
     mol = Chem.DeleteSubstructs(mol, Chem.MolFromSmarts("[#0]"))
     mol.UpdatePropertyCache(strict=False)
     if add_hydrogens:
-        mol = Chem.AddHs(mol, addCoords=True, explicitOnly=False)
-    else:
         mol = Chem.AddHs(mol, addCoords=True, explicitOnly=True)
-    mol.UpdatePropertyCache(strict=False)
+        mol.UpdatePropertyCache(strict=False)
 
     tmc_idx = find_metal_index(mol)
 
@@ -865,6 +870,7 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
     lig_info = []
     for i, f in enumerate(frag_mols):
         m = Chem.Mol(f)
+        m.UpdatePropertyCache(strict=False)
         atoms = m.GetAtoms()
         for atom in atoms:  # Check that metal is found
             if atom.GetAtomicNum() in METALS_NUM:
