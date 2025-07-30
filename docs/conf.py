@@ -53,10 +53,12 @@ extensions = [
     "sphinx.ext.extlinks",
     "sphinx_design",
     "sphinx_copybutton",
+    "nbsphinx",
 ]
 
 
 autosummary_generate = True
+add_module_names = False
 napoleon_google_docstring = False
 napoleon_use_param = False
 napoleon_use_ivar = True
@@ -67,8 +69,8 @@ templates_path = [os.path.join("_templates", "autosummary")]
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
 #
-# source_suffix = ['.rst', '.md']
-source_suffix = ".rst"
+source_suffix = [".rst"]
+# source_suffix = ".rst"
 
 # The master toctree document.
 master_doc = "index"

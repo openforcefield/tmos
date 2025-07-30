@@ -2,6 +2,13 @@ API Documentation
 =================
 
 .. autosummary::
-   :toctree: autosummary
+   :toctree: _autosummary
+   :template: module.rst
+   :recursive:
 
-   tmos.canvas
+   tmos.build_rdmol
+   tmos.geometry
+   tmos.graph_mapping
+   tmos.reference_values
+   tmos.tmos
+   tmos.utils

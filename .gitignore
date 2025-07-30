@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# VS Code
+.vscode/
+
+*.DS_Store
+
 # Distribution / packaging
 .Python
 env/
@@ -64,6 +69,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/_autosummary
 
 # PyBuilder
 target/

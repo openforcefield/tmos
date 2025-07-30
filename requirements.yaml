@@ -1,0 +1,25 @@
+name: tmos
+channels:
+
+  - conda-forge
+
+  - defaults
+dependencies:
+    # Base depends
+  - python
+  - pip
+  - rdkit>=2025.3.3
+  - openbabel
+#  - mdanalysis>=2.10.0 # Not yet released
+  - mdanalysis
+  - networkx
+  - qcelemental
+  - periodictable
+  - numpy
+  - deepdiff
+  - py3Dmol
+
+  - pydata-sphinx-theme
+  - sphinx-design
+  - sphinx-copybutton
+  - nbsphinx
