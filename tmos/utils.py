@@ -86,7 +86,7 @@ def get_molecular_formula(mol, make_hydrogens_implicit=False):
     return formula
 
 
-def view3D(molecule, labels=False, kekulize=True):
+def view3D(molecule, label_idx=False, label_symbol=False, kekulize=True):
     """
     Format 3D view of an RDKit molecule.
 
@@ -94,8 +94,10 @@ def view3D(molecule, labels=False, kekulize=True):
     ----------
     molecule : rdkit.Chem.rdchem.Mol
         RDKit molecule to be viewed.
-    labels : bool, optional
+    label_idx : bool, optional
         If True, atom indices will be displayed as labels. Default is False.
+    label_symbol : bool, optional
+        If True, atom symbol will be displayed as labels. Default is False.
     kekulize : bool, optional
         If True, kekulize the molecule before rendering. Default is True.
 
@@ -114,22 +116,29 @@ def view3D(molecule, labels=False, kekulize=True):
         style={"stick": {}, "sphere": {"scale": 0.3}},
     )
 
-    # Add atom labels (indices)
-    if labels:
-        if mol.GetNumConformers() == 0:
-            raise ValueError(
-                "Cannot add 3D model labels without conformer coordinates."
-            )
+    def label_func(i, atom):
+        if label_symbol and label_idx:
+            return f"{i}: {atom.GetSymbol()}"
+        elif label_idx:
+            return str(i)
+        elif label_symbol:
+            return atom.GetSymbol()
+        else:
+            return None
+
+    if label_func:
         for i, atom in enumerate(mol.GetAtoms()):
             pos = mol.GetConformer().GetAtomPosition(i)
-            view.addLabel(
-                str(i),
-                {
-                    "position": {"x": pos.x, "y": pos.y, "z": pos.z},
-                    "backgroundColor": "white",
-                    "backgroundOpacity": 0.2,
-                    "fontColor": "black",
-                },
-            )
+            label = label_func(i, atom)
+            if label:
+                view.addLabel(
+                    label,
+                    {
+                        "position": {"x": pos.x, "y": pos.y, "z": pos.z},
+                        "backgroundColor": "white",
+                        "backgroundOpacity": 0.2,
+                        "fontColor": "black",
+                    },
+                )
 
     return view
