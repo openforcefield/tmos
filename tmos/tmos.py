@@ -15,6 +15,7 @@ from rdkit.Chem import GetPeriodicTable, rdmolops
 from rdkit.Chem.MolStandardize import rdMolStandardize
 from rdkit.Geometry import Point3D
 from rdkit import RDLogger
+from rdkit.Chem import rdMolDescriptors
 
 from .utils import get_molecular_formula
 from . import build_rdmol as brd
@@ -26,7 +27,10 @@ pt = GetPeriodicTable()
 
 
 def sanitize_molecule(
-    mol, update_charges=True, sanitize_aromaticity=False, sanitize_kekulize=False
+    mol,
+    update_charges=True,
+    sanitize_aromaticity=False,
+    sanitize_kekulize=False,
 ):
     """Sanitize TMC molecule by updating formal charges to apparent value based on connectivity and use
     RDKit sanitization without SANITIZE_SETAROMATICITY or SANITIZE_KEKULIZE.
@@ -45,6 +49,7 @@ def sanitize_molecule(
 
     if update_charges:
         brd.update_formal_charges(mol)
+
     sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL
     if not sanitize_aromaticity:
         sanitize_ops ^= (
@@ -52,13 +57,35 @@ def sanitize_molecule(
         )  # Needed for porphyrins
     if not sanitize_kekulize:  # Should be True for porphyrins
         sanitize_ops ^= Chem.SanitizeFlags.SANITIZE_KEKULIZE
+
     Chem.SanitizeMol(
         mol,
         sanitizeOps=sanitize_ops,
     )
 
 
-def mol_from_smiles(smiles, sanitize=False, sanitize_kwargs={}):
+def compare_fingerprint(mol1, mol2):
+    """Compare molecular identity
+
+    Parameters
+    ----------
+    mol1 : rdkit.Chem.rdchem.Mol
+        RDKit molecule
+    mol2 : rdkit.Chem.rdchem.Mol
+        RDKit molecule
+
+    Returns
+    -------
+    bool
+        Whether canonical tautomer-aware fingerprints are identical
+    """
+    fp1 = rdMolDescriptors.GetMorganFingerprint(mol1, 2)
+    fp2 = rdMolDescriptors.GetMorganFingerprint(mol2, 2)
+
+    return fp1 == fp2
+
+
+def mol_from_smiles(smiles, sanitize=True, sanitize_kwargs={}):
     """Convert a SMILES string into a RDKit Molecule
 
     Parameters
@@ -95,7 +122,7 @@ def mol_to_smiles(mol):
     str
         Nonisomeric SMILES string
     """
-    return Chem.MolToSmiles(mol, isomericSmiles=False)
+    return Chem.MolToSmiles(mol, isomericSmiles=False, allHsExplicit=True)
 
 
 def wipe_molecule(mol):
@@ -222,9 +249,9 @@ def determine_bonds(mol):
         Resulting molecule, or None if the bonds could not be determined for the molecule.
     """
     mol = copy.deepcopy(mol)
-
     new_mol = brd.determine_bonds_openbabel(mol, return_implicit_Hs=True)
     if new_mol is None:
+        #        print("Try MDAnalysis bond determination")
         new_mol = brd.determine_bonds_mda(mol)
     else:
         new_mol = brd.update_atom_bond_props(copy.deepcopy(mol), new_mol)
@@ -322,7 +349,7 @@ def sanitize_ligand(
                 sanitize_molecule(
                     mol_after, sanitize_kekulize=True
                 )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
-            except Chem.rdchem.AtomValenceException:
+            except Exception:
                 warnings.warn("RDKit sanitize failed, passing molecule as is.")
 
     return mol_after
@@ -467,7 +494,6 @@ def get_ligand_attributes(
         for x, y in ligand_best["charged_atoms"].items():
             print(f"    {x}: {y}")
 
-    sanitize_molecule(ligand_best["rdmol"])
     ligand_best["smiles"] = mol_to_smiles(ligand_best["rdmol"])
 
     return ligand_best
@@ -504,6 +530,39 @@ def assert_same_ring(mol, ind1, ind2, max_ring_size=6):
         return ind2 in indices
 
 
+def detect_additional_bonds(mol, index=None):
+    """Use the coordinates to check if any other bonds could be defined.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        RDKit molecule
+    index : int, optional, default=None
+        Index of target atom to look for bonds. If None, all bonds are added.
+
+    Returns
+    -------
+    rdkit.Chem.rdchem.Mol
+        RDKit molecule
+    """
+    mol = Chem.RWMol(copy.deepcopy(mol))
+    if mol.GetNumConformers() == 0:
+        warnings.warn("Provided molecule does not have any coordinates")
+        return mol
+
+    symbols = [a.GetSymbol() for a in mol.GetAtoms()]
+    conformer = mol.GetConformer()
+    positions = np.array(conformer.GetPositions())
+    new_mol = brd.xyz_to_rdkit(symbols, positions)  # atom ids will be equivalent
+    for bond in new_mol.GetBonds():
+        idx1, idx2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        if mol.GetBondBetweenAtoms(idx1, idx2) is None and (
+            index is None or index in [idx1, idx2]
+        ):
+            mol.AddBond(idx1, idx2, Chem.rdchem.BondType.SINGLE)
+    return mol
+
+
 def correct_ferrocene(mol, index):
     """Correct a ferrocene containing molecule to ensure that all hydrogens are included
 
@@ -520,8 +579,6 @@ def correct_ferrocene(mol, index):
         Output molecule with corrected ferrocene group
     new_index : int
         The atomic index of the ferrocene metal center, if changed
-    tm_ox : int
-        Oxidation state of the metal, ``tm_ox = 2`` for ferrocene
     """
 
     metal = mol.GetAtoms()[index]
@@ -545,7 +602,8 @@ def correct_ferrocene(mol, index):
             else:
                 bc.SetBondType(Chem.BondType.SINGLE)
         b.SetBondType(Chem.BondType.DATIVE)
-        carbon.SetNoImplicit(False)
+        carbon.SetNoImplicit(True)
+        carbon.SetNumExplicitHs(0)
         if carbon.GetDegree() < 4:
             carbon.SetNumExplicitHs(1)
         carbon.UpdatePropertyCache(strict=False)
@@ -557,7 +615,7 @@ def correct_ferrocene(mol, index):
             # tm_atom = a.GetSymbol()
             new_index = a.GetIdx()
 
-    return mol, new_index, 2
+    return mol, new_index
 
 
 def compute_centroid_excluding(conformer, exclude_atoms):
@@ -812,8 +870,11 @@ def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
 
 
 def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=False):
-    """
-    Separate ligands from a transition metal complex and determine appropriate charges.
+    """Sanitize ligands, determining X-type and L-type, returning a sanitized complex with
+    oxidation state, number of electrons, and metal formal charge.
+
+    Note that if coordinates are present in a conformer, bonds are detected to find all
+    metal interaction points.
 
     Parameters
     ----------
@@ -866,12 +927,13 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
         mol.UpdatePropertyCache(strict=False)
 
     tmc_idx = find_metal_index(mol)
+    mol = detect_additional_bonds(mol, index=tmc_idx)
 
     # Detect and correct special cases
     if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene
         if verbose:
             print("Detect ferrocene!")
-        mol, tmc_idx, tm_ox = correct_ferrocene(mol, tmc_idx)
+        mol, tmc_idx = correct_ferrocene(mol, tmc_idx)
 
     missing_coord_indices = find_missing_coords(mol, value=value_missing_coord)
     if missing_coord_indices:
