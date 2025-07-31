@@ -314,7 +314,7 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_toleranc
     return mol
 
 
-def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1):
+def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1, ignore_scale=False):
     """
     Convert a QCElemental molecule to an RDKit molecule.
 
@@ -326,12 +326,30 @@ def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1):
         Matrix of the same length as ``symbols`` with x, y, and z coordinates in Angstroms
     distance_tolerance : float, optional, default=0.1
         Additional tolerance for bond distance cutoffs (Angstroms) in :func:`determine_connectivity`
+    ignore_scale : bool, optional, default=False
+        If True avoid an error when "H" is present and the minimum atomic distance is not between
+        0.8 Å and 1.5 Å.
 
     Returns:
     --------
     rdkit.Chem.Mol
         RDKit molecule object
     """
+
+    if len(symbols) != len(positions):
+        raise ValueError(
+            "Number of provided elements does not match the number of provided positions."
+        )
+    distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
+    distances[np.where(distances == 0)] = np.nan
+    if np.sum(np.isnan(distances)) != len(symbols):
+        raise ValueError("Atoms are overlapping")
+    if "H" in symbols and (
+        0.8 >= np.nanmin(distances) or np.nanmin(distances) >= 1.5 or ignore_scale
+    ):
+        raise ValueError(
+            "Minimum distance is not in the range of a bonded hydrogen; a unit conversion may be required. If this is intentional, consider setting `ignore_scale=True`"
+        )
 
     mol = Chem.RWMol()
     for i, symbol in enumerate(symbols):
@@ -619,6 +637,7 @@ def determine_bonds_openbabel(mol, return_implicit_Hs=False, verbose=False):
         properties may have been lost. Returns None if bond determination failed.
     """
     mol = copy.deepcopy(mol)
+
     mol.UpdatePropertyCache(strict=False)
     if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
         raise ValueError("Provided molecule has implicit hydrogen atoms.")
@@ -674,6 +693,8 @@ def update_atom_bond_props(mol_to_change, mol_reference, sanitize=True):
         RDKit molecule that needs to be updated
     mol_reference : rdkit.Chem.Mol
         RDKit molecule for reference to update the target molecule
+    sanitize : bool, optional, default=True
+        Sanitize the resulting molecule
 
     Raises
     ------
@@ -751,9 +772,7 @@ def add_obvious_bonds(mol):
     mol.UpdatePropertyCache(strict=False)
     _, _, charged_atoms = assess_atoms(mol)
     if charged_atoms:
-        atoms_hanging_bonds = [
-            index for index, tmp in charged_atoms.items() if tmp["charge"] < 0
-        ]
+        atoms_hanging_bonds = [index for index in charged_atoms.keys()]
         pairs = list(itertools.combinations(atoms_hanging_bonds, 2))
         for idx1, idx2 in pairs:
             bond = mol.GetBondBetweenAtoms(idx1, idx2)
@@ -772,5 +791,4 @@ def add_obvious_bonds(mol):
                 bond.SetBondType(bond_type_dict[bo - chg1])
                 atom1.SetFormalCharge(0)
                 atom2.SetFormalCharge(0)
-
         mol.UpdatePropertyCache(strict=False)
