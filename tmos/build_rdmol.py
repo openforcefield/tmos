@@ -23,16 +23,8 @@ from rdkit import RDLogger
 
 import periodictable
 from MDAnalysis.converters.RDKitInferring import MDAnalysisInferrer
+from openbabel import openbabel as ob
 
-try:
-    from openbabel import openbabel as ob
-
-    OPENBABEL_AVAILABLE = True
-except ImportError:
-    OPENBABEL_AVAILABLE = False
-    warnings.warn(
-        "OpenBabel not available. Will use RDKit-only connectivity detection."
-    )
 
 from .utils import first_traceback, get_molecular_formula
 from .graph_mapping import (
@@ -344,8 +336,10 @@ def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1, ignore_scale=False)
     distances[np.where(distances == 0)] = np.nan
     if np.sum(np.isnan(distances)) != len(symbols):
         raise ValueError("Atoms are overlapping")
-    if "H" in symbols and (
-        0.8 >= np.nanmin(distances) or np.nanmin(distances) >= 1.5 or ignore_scale
+    if (
+        "H" in symbols
+        and not ignore_scale
+        and (0.8 >= np.nanmin(distances) or np.nanmin(distances) >= 1.5)
     ):
         raise ValueError(
             "Minimum distance is not in the range of a bonded hydrogen; a unit conversion may be required. If this is intentional, consider setting `ignore_scale=True`"
@@ -404,9 +398,9 @@ def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.1):
         RDKit molecule with bonds added
     """
 
-    if method == "openbabel" and OPENBABEL_AVAILABLE:
+    if method == "openbabel":
         return _determine_connectivity_openbabel(rdkit_mol)
-    elif method == "rdkit" or not OPENBABEL_AVAILABLE:
+    elif method == "rdkit":
         return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
     else:
         return _determine_connectivity_hybrid(rdkit_mol, distance_tolerance)
@@ -414,8 +408,6 @@ def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.1):
 
 def _determine_connectivity_openbabel(rdkit_mol):
     """Use OpenBabel to determine connectivity."""
-    if not OPENBABEL_AVAILABLE:
-        raise ImportError("OpenBabel not available")
 
     ob_mol = ob.OBMol()
     ob_conv = ob.OBConversion()
@@ -442,7 +434,7 @@ def _get_covalent_radius(symbol, fallback_radius=1.5):
         if hasattr(element, "covalent_radius") and element.covalent_radius is not None:
             return element.covalent_radius / 100.0  # pm to Angstroms
         elif _is_transition_metal(symbol):
-            return transition_metal_covalent_radii.get(symbol)
+            return transition_metal_covalent_radii.get(symbol, fallback_radius)
         else:
             return fallback_radius
     except AttributeError:
@@ -501,13 +493,12 @@ def _determine_connectivity_rdkit(rdkit_mol, distance_tolerance=0.1):
 def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.1):
     """Use both RDKit and OpenBabel for best results."""
 
-    if OPENBABEL_AVAILABLE:
-        try:
-            mol_ob = _determine_connectivity_openbabel(rdkit_mol)
-            if mol_ob is not None and mol_ob.GetNumBonds() > 0:
-                return mol_ob
-        except Exception:
-            pass
+    try:
+        mol_ob = _determine_connectivity_openbabel(rdkit_mol)
+        if mol_ob is not None and mol_ob.GetNumBonds() > 0:
+            return mol_ob
+    except Exception:
+        pass
 
     # Fall back to RDKit method
     return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
