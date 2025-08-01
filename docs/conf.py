@@ -63,6 +63,11 @@ napoleon_google_docstring = False
 napoleon_use_param = False
 napoleon_use_ivar = True
 
+# Mock imports for dependencies that might not be available during doc builds
+autodoc_mock_imports = [
+    "openbabel",
+]
+
 # Add any paths that contain templates here, relative to this directory.
 templates_path = [os.path.join("_templates", "autosummary")]
 
