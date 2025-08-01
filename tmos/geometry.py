@@ -6,29 +6,42 @@ from .reference_values import ideal_angles
 
 
 def get_coordinates(mol, index):
-    """Get atom coordinates
+    """Get the 3D coordinates of an atom from an RDKit molecule.
 
-    Args:
-        mol (rdkit.Chem.rdchem.Mol): RDKit molecule
-        index (int): Index of an atom
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        RDKit molecule object.
+    index : int
+        Index of the atom whose coordinates are to be retrieved.
 
-    Returns:
-        numpy.ndarray: Atomic coordinates
+    Returns
+    -------
+    numpy.ndarray
+        A 1D array of shape (3,) containing the x, y, z coordinates of the atom.
     """
+
     atm = mol.GetConformer().GetAtomPosition(index)
     return np.array([atm.x, atm.y, atm.z])
 
 
 def get_distance(mol, ind1, ind2):
-    """Get the distance between two atoms
+    """
+    Get the distance between two atoms.
 
-    Args:
-        mol (rdkit.Chem.rdchem.Mol): RDKit molecule
-        ind1 (int): Index of an atom
-        ind2 (int): Index of an atom
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        RDKit molecule.
+    ind1 : int
+        Index of the first atom.
+    ind2 : int
+        Index of the second atom.
 
-    Returns:
-        float: Distance between atoms
+    Returns
+    -------
+    float
+        Distance between atoms.
     """
 
     return np.linalg.norm(get_coordinates(mol, ind1) - get_coordinates(mol, ind2))
@@ -39,17 +52,35 @@ def get_geometry_from_xyz(
 ):
     """Determine the bonded geometry of a central atom based on atomic positions from xyz coordinates.
 
-    Args:
-        positions (numpy.ndarray): Array of atomic positions (shape: Nx3).
-        central_idx (int): Index of the central atom in the positions array.
-        r_cut (float, optional): Distance cutoff to filter neighboring atoms. Defaults to 2 Angstroms.
-        tol (float, optional): Tolerance for angle comparison in degrees. Defaults to 15.
-        verbose (bool, optional): If True, prints additional debugging information. Defaults to False.
-        ignore_scale (bool, optional): If True, the warning that the minimum bond is not between 0.8 and 1.5
-        Å is ignored.
+    Parameters
+    ----------
+    positions : numpy.ndarray
+        Array of atomic positions with shape (N, 3).
+    central_idx : int
+        Index of the central atom in the positions array.
+    r_cut : float, optional
+        Distance cutoff (in Å) to filter neighboring atoms. Defaults to 2.5.
+    tol : float, optional
+        Tolerance for angle comparison in degrees. Defaults to 15.
+    verbose : bool, optional
+        If True, prints additional debugging information. Defaults to False.
+    ignore_scale : bool, optional
+        If True, ignores the warning when the minimum bond is not between 0.8 and 1.5 Å.
 
-    Returns:
-        str: The determined geometry of the central atom, or an empty string if undetermined.
+    Returns
+    -------
+    str or tuple
+        The determined geometry of the central atom as a string, or a tuple (geometry, n) where n is the number of neighbors.
+        Returns an empty string if undetermined.
+
+    Raises
+    ------
+    ValueError
+        If the minimum bond distance is outside the expected range and `ignore_scale` is False.
+
+    Notes
+    -----
+    This function uses heuristics based on pairwise angles between neighboring atoms to classify the geometry.
     """
 
     central_pos = positions[central_idx]
@@ -66,8 +97,10 @@ def get_geometry_from_xyz(
     positions -= np.array(central_pos)
 
     n = len(positions)
-    if n < 2:
-        return ""
+    if n == 1:
+        return "Monocoordinate", n
+    elif n == 0:
+        return "Element", n
 
     # Compute all pairwise angles
     angles = []
@@ -90,11 +123,11 @@ def get_geometry_from_xyz(
     # Heuristic classification
     if n == 2:
         if np.allclose(avg_angle, 180, atol=tol):
-            return "Linear"
+            return "Linear", n
         else:
-            return "Bent"
+            return "Bent", n
     elif n == 10:
-        return "Ferrocene"
+        return "Ferrocene", n
     else:
         scores = {
             key: np.mean(np.abs(angles - value))
@@ -107,31 +140,44 @@ def get_geometry_from_xyz(
             print(
                 f"This {n}-coordinate center is closest to {geometry} but not within tolerance."
             )
-            return "Undetermined"
+            return "Undetermined", n
         else:
-            return geometry
+            return geometry, n
 
 
 def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
-    """Determine the bonded geometry of a central atom based on atomic positions from an RDKit molecule coordinates.
+    """
+    Determine the bonded geometry of a central atom based on atomic positions from an RDKit molecule.
 
-    Args:
-        mol (rdkit.Chem.rdchem.Mol): RDKit molecule
-        central_idx (int): Index of the central atom in the positions array.
-        tol (float, optional): Tolerance for angle comparison in degrees. Defaults to 15.
-        verbose (bool, optional): If True, prints additional debugging information. Defaults to False.
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        RDKit molecule object.
+    central_idx : int
+        Index of the central atom in the molecule.
+    tol : float, optional, default=15
+        Tolerance for angle comparison in degrees.
+    verbose : bool, optional, default=False
+        If True, prints additional debugging information.
 
-    Returns:
-        str: The determined geometry of the central atom, or an empty string if undetermined.
+    Returns
+    -------
+    geometry_name : str
+        The determined geometry of the central atom, or "Undetermined" if not within tolerance.
+    n : int
+        Number of neighboring atoms.
     """
 
     conf = mol.GetConformer()
     central_pos = np.array(conf.GetAtomPosition(central_idx))
     atom = mol.GetAtomWithIdx(central_idx)
     neighbors = atom.GetNeighbors()
+    n = len(neighbors)
 
-    if len(neighbors) < 2:
-        return ""
+    if n == 1:
+        return "Monocoordinate", n
+    elif n == 0:
+        return "Element", n
 
     positions = [
         np.array(conf.GetAtomPosition(n.GetIdx())) - central_pos for n in neighbors
@@ -154,15 +200,14 @@ def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
             angles.append(angle)
     angles = np.sort(np.array(angles))
     avg_angle = np.mean(angles)
-    n = len(neighbors)
     # Heuristic classification
     if n == 2:
         if np.allclose(avg_angle, 180, atol=tol):
-            return "Linear"
+            return "Linear", n
         else:
-            return "Bent"
+            return "Bent", n
     elif n == 10:
-        return "Ferrocene"
+        return "Ferrocene", n
     else:
         scores = {
             key: np.mean(np.abs(angles - value))
@@ -175,6 +220,6 @@ def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
             warnings.warn(
                 f"This {n}-coordinate center is closest to {geometry} but not within tolerance."
             )
-            return "Undetermined"
+            return "Undetermined", n
         else:
-            return geometry
+            return geometry, n
