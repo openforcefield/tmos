@@ -1,9 +1,9 @@
 version: 2
 
 build:
-  os: "ubuntu-22.04"
+  os: "ubuntu-lts-latest"
   tools:
-    python: "mambaforge-23.11"
+      python: "mambaforge-latest"
   commands:
     - mamba env create --verbose --name $READTHEDOCS_VIRTUALENV_NAME --file requirements.yaml
     - mamba run --name $READTHEDOCS_VIRTUALENV_NAME pip install -e .
