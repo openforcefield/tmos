@@ -1,9 +1,9 @@
 name: tmos
+
 channels:
-
   - conda-forge
-
   - defaults
+
 dependencies:
     # Base depends
   - python
@@ -23,3 +23,6 @@ dependencies:
   - sphinx-design
   - sphinx-copybutton
   - nbsphinx
+
+  - pip:
+      - -e .
