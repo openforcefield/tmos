@@ -495,6 +495,7 @@ def get_ligand_attributes(
             print(f"    {x}: {y}")
 
     ligand_best["smiles"] = mol_to_smiles(ligand_best["rdmol"])
+    ligand_best["chemical_formula"] = get_molecular_formula(ligand_best["rdmol"])
 
     return ligand_best
 
@@ -869,7 +870,53 @@ def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
     return frag_mols, coordinating_atoms
 
 
-def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=False):
+def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=False):
+    """Prepare complex removing anomalous substructs, adding additional metal connections,
+    checking for missing coordinates, and possible addition of hydrogens.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        RDKit molecule representing the transition metal complex.
+    verbose : bool, optional, default=False
+        If True, print updates during processing.
+    value_missing_coord : float, optional, default=0
+        Value used to detect missing coordinates (e.g., 0 for (0,0,0)).
+    add_hydrogens : bool, optional, default=False
+        If True, add explicit hydrogens to the structure if needed.
+
+    Returns
+    -------
+    mol : rdkit.Chem.rdchem.Mol
+        RDKit molecule representing the transition metal complex.
+    """
+
+    mol = Chem.DeleteSubstructs(copy.deepcopy(mol), Chem.MolFromSmarts("[#0]"))
+    mol.UpdatePropertyCache(strict=False)
+    if add_hydrogens:
+        mol = Chem.AddHs(mol, addCoords=True, explicitOnly=True)
+        mol.UpdatePropertyCache(strict=False)
+
+    tmc_idx = find_metal_index(mol)
+    mol = detect_additional_bonds(mol, index=tmc_idx)
+
+    # Detect and correct special cases
+    if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene
+        if verbose:
+            print("Detect ferrocene!")
+        mol, tmc_idx = correct_ferrocene(mol, tmc_idx)
+
+    missing_coord_indices = find_missing_coords(mol, value=value_missing_coord)
+    if missing_coord_indices:
+        raise ValueError("Molecule missing coordinates")
+    #    mol = fix_missing_coords(mol, tmc_idx, missing_coord_indices)
+
+    return mol
+
+
+def sanitize_complex(
+    mol, verbose=False, value_missing_coord=0, add_hydrogens=False, add_atom="I"
+):
     """Sanitize ligands, determining X-type and L-type, returning a sanitized complex with
     oxidation state, number of electrons, and metal formal charge.
 
@@ -886,6 +933,8 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
         Value used to detect missing coordinates (e.g., 0 for (0,0,0)).
     add_hydrogens : bool, optional, default=False
         If True, add explicit hydrogens to the structure if needed.
+    add_atom : str, optional, default='I'
+        Element symbol of the "dummy atom" used in :func:`cleave_mol_from_index`
 
     Raises
     ------
@@ -919,34 +968,20 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
                 - "total_charge": Overall charge of the complex.
                 - "geometry": Geometry information of the complex.
     """
-    tm_ox = None
-    mol = Chem.DeleteSubstructs(mol, Chem.MolFromSmarts("[#0]"))
-    mol.UpdatePropertyCache(strict=False)
-    if add_hydrogens:
-        mol = Chem.AddHs(mol, addCoords=True, explicitOnly=True)
-        mol.UpdatePropertyCache(strict=False)
 
+    mol = prepare_complex(
+        copy.deepcopy(mol),
+        verbose=verbose,
+        value_missing_coord=value_missing_coord,
+        add_hydrogens=add_hydrogens,
+    )
     tmc_idx = find_metal_index(mol)
-    mol = detect_additional_bonds(mol, index=tmc_idx)
-
-    # Detect and correct special cases
-    if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene
-        if verbose:
-            print("Detect ferrocene!")
-        mol, tmc_idx = correct_ferrocene(mol, tmc_idx)
-
-    missing_coord_indices = find_missing_coords(mol, value=value_missing_coord)
-    if missing_coord_indices:
-        raise ValueError("Molecule missing coordinates")
-    #    mol = fix_missing_coords(mol, tmc_idx, missing_coord_indices)
-
     # Split the ligands from the metal center, note that we are adding a single bonded At to each atom that
     # was connected to the metal center.
-    add_atom = "I"
     frag_mols, coordinating_atoms = cleave_mol_from_index(
         mol, tmc_idx, verbose=verbose, add_atom=add_atom
     )
-    geometry = get_geometry_from_mol(mol, tmc_idx)
+    geometry, n_bonds = get_geometry_from_mol(mol, tmc_idx)
 
     total_xtype = 0
     total_ltype = 0
@@ -991,9 +1026,13 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
             coordinating_atoms,
             tm_charge=tm_chg,
         )
+        metal_symbol = tmp_tm_mol.GetAtoms()[0].GetSymbol()
         charge = sum([a.GetFormalCharge() for a in tmc_mol.GetAtoms()])
-        outputs[f"OS: {tm_ox}; q: {charge}; Nel: {tm_nel}"] = {
+        outputs[
+            f"{metal_symbol}; {n_bonds}:{geometry}; OS:{tm_ox}; q:{charge}; Nel:{tm_nel}"
+        ] = {
             "metal_info": {
+                "chemical_formula": metal_symbol,
                 "rdmol": tmp_tm_mol,
                 "oxidation_state": tm_ox,
                 "total_charge": tm_chg,
@@ -1001,7 +1040,9 @@ def sanitize_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fa
             },
             "ligand_info": lig_info,
             "complex_info": {
+                "number_metal_connections": n_bonds,
                 "smiles": mol_to_smiles(tmc_mol),
+                "chemical_formula": get_molecular_formula(tmc_mol),
                 "rdmol": tmc_mol,
                 "oxidation_state": tm_ox,
                 "total_charge": charge,
