@@ -4,6 +4,12 @@ build:
   os: "ubuntu-22.04"
   tools:
     python: "mambaforge-23.11"
+  commands:
+    - mamba env create --verbose --name $READTHEDOCS_VIRTUALENV_NAME --file requirements.yaml
+    - mamba run --name $READTHEDOCS_VIRTUALENV_NAME pip install -e .
+    - echo "=== Checking for obabel executable ==="
+    - mamba run --name $READTHEDOCS_VIRTUALENV_NAME which obabel || echo "obabel not found in PATH"
+    - mamba run --name $READTHEDOCS_VIRTUALENV_NAME obabel --version || echo "obabel command failed"
 
 conda:
   environment: requirements.yaml
