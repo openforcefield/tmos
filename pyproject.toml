@@ -19,19 +19,19 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 requires-python = ">=3.10"
-# Declare any run-time dependencies that should be installed with the package.
-dependencies = [
-    "importlib-resources;python_version<'3.10'",
-    "rdkit>=2025.3.3",
-    "openbabel",
-#    "mdanalysis>=2.10.0", # not released yet but required
-    "networkx",
-    "qcelemental",
-    "periodictable",
-    "numpy",
-    "deepdiff",
-    "py3Dmol",
-]
+## Declare any run-time dependencies that should be installed with the package.
+#dependencies = [
+#    "importlib-resources;python_version<'3.10'",
+#    "rdkit>=2025.3.3",
+#    "openbabel",
+##    "mdanalysis>=2.10.0", # not released yet but required
+#    "networkx",
+#    "qcelemental",
+#    "periodictable",
+#    "numpy",
+#    "deepdiff",
+#    "py3Dmol",
+#]
 
 # Update the urls once the hosting is set up.
 [project.urls]
@@ -42,12 +42,12 @@ dependencies = [
 test = [
   "pytest>=6.1.2",
 ]
-docs = [
-  "pydata-sphinx-theme",
-  "sphinx-design",
-  "sphinx-copybutton",
-  "nbsphinx",
-]
+#docs = [
+#  "pydata-sphinx-theme",
+#  "sphinx-design",
+#  "sphinx-copybutton",
+#  "nbsphinx",
+#]
 
 [tool.setuptools]
 # This subkey is a beta stage development and keys may change in the future, see https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html for more details

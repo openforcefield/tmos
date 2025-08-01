@@ -2,11 +2,10 @@ name: tmos
 
 channels:
   - conda-forge
-  - defaults
 
 dependencies:
     # Base depends
-  - python
+  - python=3.11
   - pip
   - rdkit>=2025.3.3
   - openbabel
