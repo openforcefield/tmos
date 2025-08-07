@@ -3,8 +3,8 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to Transition Metal Oxidation State's documentation!
-=========================================================
+Welcome to the documentation for Transition Metal Oxidation State (TMOS)!
+==========================================================================
 
 .. grid:: 1 1 2 2
 

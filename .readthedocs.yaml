@@ -3,16 +3,10 @@ version: 2
 build:
   os: "ubuntu-lts-latest"
   tools:
-      python: "mambaforge-latest"
-  commands:
-    - mamba env create --verbose --name $READTHEDOCS_VIRTUALENV_NAME --file requirements.yaml
-    - mamba run --name $READTHEDOCS_VIRTUALENV_NAME pip install -e .
-    - echo "=== Checking for obabel executable ==="
-    - mamba run --name $READTHEDOCS_VIRTUALENV_NAME which obabel || echo "obabel not found in PATH"
-    - mamba run --name $READTHEDOCS_VIRTUALENV_NAME obabel --version || echo "obabel command failed"
+    python: "mambaforge-latest"
 
 conda:
   environment: requirements.yaml
 
 sphinx:
-   configuration: docs/conf.py
+  configuration: docs/conf.py
