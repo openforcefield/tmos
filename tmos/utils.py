@@ -3,6 +3,7 @@
 import traceback
 from collections import defaultdict
 import json
+import re
 
 import numpy as np
 import py3Dmol
@@ -84,6 +85,27 @@ def get_molecular_formula(mol, make_hydrogens_implicit=False):
         del comp["H"]
     formula = "".join([str(x) for k, val in comp.items() for x in [k, val]])
     return formula
+
+
+def molecular_formula_to_dict(formula):
+    """Get molecular formula dictionary with elements sorted in alphabetical order.
+
+    Parameters
+    ----------
+    formula : str
+        Molecular formula, e.g., C1H4
+
+    Returns
+    -------
+    dict
+        Dictionary with keys as elements and values as the number of elements in the molecule.
+    """
+
+    pattern = r"([A-Z][a-z]*)(\d+)"
+    matches = re.findall(pattern, formula)
+    formula_dict = {element: int(count) for element, count in matches}
+
+    return formula_dict
 
 
 def view3D(molecule, label_idx=False, label_symbol=False, kekulize=True):
