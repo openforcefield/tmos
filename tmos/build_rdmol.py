@@ -397,7 +397,6 @@ def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.1):
     rdkit.Chem.Mol
         RDKit molecule with bonds added
     """
-
     if method == "openbabel":
         return _determine_connectivity_openbabel(rdkit_mol)
     elif method == "rdkit":
@@ -411,15 +410,15 @@ def _determine_connectivity_openbabel(rdkit_mol):
 
     ob_mol = ob.OBMol()
     ob_conv = ob.OBConversion()
-    ob_conv.SetInFormat("sdf")
-    ob_conv.ReadString(ob_mol, Chem.MolToMolBlock(rdkit_mol))
+    ob_conv.SetInAndOutFormats("mol", "mol")
+    mol_block = Chem.MolToMolBlock(rdkit_mol, forceV3000=True)
+    ob_conv.ReadString(ob_mol, mol_block)
 
     # Determine connectivity
     ob_mol.ConnectTheDots()
     ob_mol.PerceiveBondOrders()
 
     # Convert back to RDKit
-    ob_conv.SetOutFormat("sdf")
     mol_block_with_bonds = ob_conv.WriteString(ob_mol)
     mol_with_bonds = Chem.MolFromMolBlock(mol_block_with_bonds, sanitize=False)
 
@@ -432,7 +431,7 @@ def _get_covalent_radius(symbol, fallback_radius=1.5):
         element = getattr(periodictable, symbol)
         # periodictable stores covalent radius in pm, convert to Angstroms
         if hasattr(element, "covalent_radius") and element.covalent_radius is not None:
-            return element.covalent_radius / 100.0  # pm to Angstroms
+            return element.covalent_radius
         elif _is_transition_metal(symbol):
             return transition_metal_covalent_radii.get(symbol, fallback_radius)
         else:
@@ -461,8 +460,40 @@ def _is_transition_metal(symbol):
         return symbol in transition_metal_covalent_radii
 
 
-def _determine_connectivity_rdkit(rdkit_mol, distance_tolerance=0.1):
-    """Use RDKit to determine connectivity with custom metal-aware logic."""
+def _determine_connectivity_rdkit(
+    rdkit_mol, max_distance_tolerance=0.1, min_distance_tolerance=0.5
+):
+    """
+    Determine molecular connectivity using RDKit with custom logic for metal atoms.
+
+    This function analyzes the 3D coordinates of atoms in an RDKit molecule and adds bonds between atoms
+    based on covalent radii and distance thresholds. It applies special rules for transition metals by
+    increasing the bonding threshold to better account for metal complexes.
+
+    Parameters
+    ----------
+    rdkit_mol : rdkit.Chem.Mol
+        The input RDKit molecule, which must have at least one conformer with 3D coordinates.
+    max_distance_tolerance : float, optional
+        The maximum additional distance (in angstroms) allowed beyond the sum of covalent radii for bond formation. Default is 0.1.
+    min_distance_tolerance : float, optional
+        The minimum distance (in angstroms) below which atoms are considered too close to form a bond. Default is 0.5.
+
+    Returns
+    -------
+    rdkit.Chem.Mol
+        A new RDKit molecule object with bonds added according to the connectivity rules.
+
+    Raises
+    ------
+    ValueError
+        If the input molecule does not have any conformers.
+
+    Notes
+    -----
+    - Transition metals are handled with a larger bonding threshold (scaled by 1.3).
+    - Atoms are considered bonded if their distance is between the minimum and maximum thresholds and no bond already exists.
+    """
 
     mol = Chem.RWMol(rdkit_mol)
     if mol.GetNumConformers() == 0:
@@ -480,11 +511,16 @@ def _determine_connectivity_rdkit(rdkit_mol, distance_tolerance=0.1):
 
             radius_i = _get_covalent_radius(symbol_i)
             radius_j = _get_covalent_radius(symbol_j)
-            bond_threshold = radius_i + radius_j + distance_tolerance
+            max_bond_threshold = radius_i + radius_j + max_distance_tolerance
+            min_bond_threshold = radius_i + radius_j - min_distance_tolerance
             if _is_transition_metal(symbol_i) or _is_transition_metal(symbol_j):
-                bond_threshold *= 1.3  # Increase threshold for metal complexes
+                max_bond_threshold *= 1.3  # Increase threshold for metal complexes
 
-            if pos_i.Distance(conformer.GetAtomPosition(j)) < bond_threshold:
+            if (
+                pos_i.Distance(conformer.GetAtomPosition(j)) > min_bond_threshold
+                and pos_i.Distance(conformer.GetAtomPosition(j)) < max_bond_threshold
+                and mol.GetBondBetweenAtoms(i, j) is None
+            ):
                 mol.AddBond(i, j, Chem.BondType.SINGLE)
 
     return mol.GetMol()
@@ -493,15 +529,16 @@ def _determine_connectivity_rdkit(rdkit_mol, distance_tolerance=0.1):
 def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.1):
     """Use both RDKit and OpenBabel for best results."""
 
+    mol_rdkit = _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
     try:
-        mol_ob = _determine_connectivity_openbabel(rdkit_mol)
-        if mol_ob is not None and mol_ob.GetNumBonds() > 0:
-            return mol_ob
+        mol_rdkit = _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
+        if mol_rdkit is not None and mol_rdkit.GetNumBonds() > 0:
+            return mol_rdkit
     except Exception:
         pass
 
-    # Fall back to RDKit method
-    return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
+    # Fall back to Openbabel
+    return _determine_connectivity_openbabel(rdkit_mol)
 
 
 #############################################################################
