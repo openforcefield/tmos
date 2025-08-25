@@ -136,6 +136,45 @@ expected_oxidation_states = {
     "Hg": [2],
 }
 
+
+group_numbers = {
+    "Li": 1,
+    "Mg": 2,
+    # Transition metals (first row)
+    "Sc": 3,
+    "Ti": 4,
+    "V": 5,
+    "Cr": 6,
+    "Mn": 7,
+    "Fe": 8,
+    "Co": 9,
+    "Ni": 10,
+    "Cu": 11,
+    "Zn": 12,
+    # Transition metals (second row)
+    "Y": 3,
+    "Zr": 4,
+    "Nb": 5,
+    "Mo": 6,
+    "Tc": 7,
+    "Ru": 8,
+    "Rh": 9,
+    "Pd": 10,
+    "Ag": 11,
+    "Cd": 12,
+    # Transition metals (third row)
+    "Hf": 4,
+    "Ta": 5,
+    "W": 6,
+    "Re": 7,
+    "Os": 8,
+    "Ir": 9,
+    "Pt": 10,
+    "Au": 11,
+    "Hg": 12,
+}
+
+
 ideal_angles = {
     2: {  # 1 angles
         "Bent_109": np.array([109.0]),

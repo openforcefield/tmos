@@ -19,7 +19,12 @@ from rdkit.Chem import rdMolDescriptors
 
 from .utils import get_molecular_formula
 from . import build_rdmol as brd
-from .reference_values import bond_type_dict, METALS_NUM, expected_oxidation_states
+from .reference_values import (
+    bond_type_dict,
+    METALS_NUM,
+    expected_oxidation_states,
+    group_numbers,
+)
 from .geometry import get_geometry_from_mol
 
 RDLogger.DisableLog("rdApp.*")
@@ -154,7 +159,7 @@ def wipe_molecule(mol):
     return mol
 
 
-def check_ligand_exception(mol):
+def check_ligand_exception(mol, metal_coordinating_indices):
     """Corrects formal charges and bonds for molecular exceptions.
 
     Exceptions include carbon monoxide and hydrazoic acid molecules.
@@ -167,6 +172,8 @@ def check_ligand_exception(mol):
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule
+    metal_coordinating_indices : list[int]
+        Ligand molecule index of atom that was connected to the metal
 
     Returns
     -------
@@ -174,27 +181,23 @@ def check_ligand_exception(mol):
         Resulting molecule, or None if the molecule is not an exception.
     metal_connected_orig_indices : list[int]
         Original index of atom that was connected to the metal
+
     """
     mol = Chem.RWMol(copy.deepcopy(mol))
 
     # Assume there is one
+    metal_connected_orig_indices = [
+        atm.GetIntProp("__original_index")
+        for atm in mol.GetAtoms()
+        if atm.GetIdx() in metal_coordinating_indices
+    ]
     dummy_atoms = [
         atm for atm in mol.GetAtoms() if atm.GetIntProp("__original_index") == -1
     ]
     if dummy_atoms:
-        bond = dummy_atoms[0].GetBonds()[0]
-        other_atom = (
-            bond.GetBeginAtom()
-            if bond.GetEndAtom().GetIdx() == dummy_atoms[0].GetIdx()
-            else bond.GetEndAtom()
-        )
-        other_idx = other_atom.GetIdx()
-        metal_connected_orig_indices = [other_atom.GetIntProp("__original_index")]
         mol.UpdatePropertyCache(strict=False)
         for atm in sorted(dummy_atoms, key=lambda x: -x.GetIdx()):
             mol.RemoveAtom(atm.GetIdx())
-    else:
-        metal_connected_orig_indices = []
 
     formula = get_molecular_formula(mol)
     smiles = {  # Exceptions
@@ -202,6 +205,7 @@ def check_ligand_exception(mol):
         "H1N3": "[H][N]=[N+]=[N-]",
         "O1": "[O]([H])[H]",  # Instances of oxo tend to be unphysical
         "H1O2": "[O]([H])[H]",  # Instances of peroxide tend to be unphysical
+        "C1N1S1": "[N]#[C][S-]",
     }.get(formula, None)
 
     if smiles is None:
@@ -223,7 +227,10 @@ def check_ligand_exception(mol):
         tmp_mol.AddConformer(
             Chem.rdchem.Conformer(tmp_mol.GetNumAtoms()), assignId=True
         )
-        brd.copy_atom_coords(tmp_mol, 0, mol, other_idx, confId2=conf_ids[0])
+
+        brd.copy_atom_coords(
+            tmp_mol, 0, mol, metal_coordinating_indices[0], confId2=conf_ids[0]
+        )
         mol = Chem.AddHs(tmp_mol, explicitOnly=True, addCoords=True)
         for a in mol.GetAtoms():
             if a.GetIdx() == 0:
@@ -356,7 +363,11 @@ def sanitize_ligand(
 
 
 def get_ligand_attributes(
-    ligand_mol, verbose=False, add_atom=None, add_hydrogens=False
+    ligand_mol,
+    metal_coordinating_indices,
+    verbose=False,
+    add_atom=None,
+    add_hydrogens=False,
 ):
     """
     Analyze default valence and bonds to determine ligand attributes.
@@ -366,6 +377,9 @@ def get_ligand_attributes(
     ligand_mol : rdkit.Chem.rdchem.Mol)
         Ligand molecule with dummy atoms replacing ligand-metal bonds,
         denoted by ``atom.GetIntProp("__original_index") == -1``.
+    metal_coordinating_indices : list[int]
+        List of atom indices in ligand_mol that were connected to the metal. It is expected that they
+        have a Internal Property, __original_index as well.
     verbose : bool, optional, default=False
         If True, print updates.
     add_atom : str, optional, default=None
@@ -397,7 +411,9 @@ def get_ligand_attributes(
         ligand_mol = Chem.AddHs(ligand_mol, addCoords=True, explicitOnly=True)
     ligand_mol.UpdatePropertyCache(strict=False)
 
-    tmp_mol, metal_connected_orig_indices = check_ligand_exception(ligand_mol)
+    tmp_mol, metal_connected_orig_indices = check_ligand_exception(
+        ligand_mol, metal_coordinating_indices
+    )
     if tmp_mol is not None:
         if verbose:
             print("Ligand exception found.")
@@ -554,7 +570,9 @@ def detect_additional_bonds(mol, index=None):
     symbols = [a.GetSymbol() for a in mol.GetAtoms()]
     conformer = mol.GetConformer()
     positions = np.array(conformer.GetPositions())
-    new_mol = brd.xyz_to_rdkit(symbols, positions)  # atom ids will be equivalent
+    new_mol = brd.xyz_to_rdkit(
+        symbols, positions, ignore_scale=True
+    )  # atom ids will be equivalent
     for bond in new_mol.GetBonds():
         idx1, idx2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
         if mol.GetBondBetweenAtoms(idx1, idx2) is None and (
@@ -774,7 +792,7 @@ def get_tm_attributes(tm_mol, n_ltype, n_xtype, n_electrons=18):
     """
 
     atom = tm_mol.GetAtomWithIdx(0)
-    n_group = pt.GetNOuterElecs(atom.GetAtomicNum())
+    n_group = group_numbers[atom.GetSymbol()]
     charge = n_group + n_xtype + 2 * n_ltype - n_electrons
     oxidation_state = n_xtype + charge
 
@@ -819,9 +837,12 @@ def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
     params.splitAromaticC = True
     params.splitGrignards = True
     params.adjustCharges = False
+    params.splitHydrides = True  # This should ensure hydrides are split
 
-    MetalsOfInterest = "[#3,#11,#12,#19,#13,#21,#22,#23,#24,#25,#26,#27,#28,#29,#30,#39,#40,#41,#42,#43,#44,#45,#46,#47,#48,#57,#72,#73,#74,#75,#76,#77,#78,#79,#80]~[B,#6,#14,#15,#33,#51,#16,#34,#52,Cl,Br,I,#85]"
+    # Metals of interest SMARTS, including all transition metals and main group metals
+    MetalsOfInterest = "[#3,#11,#12,#19,#13,#21,#22,#23,#24,#25,#26,#27,#28,#29,#30,#39,#40,#41,#42,#43,#44,#45,#46,#47,#48,#57,#72,#73,#74,#75,#76,#77,#78,#79,#80]~[#1,#5,#6,#14,#15,#33,#51,#16,#34,#52,#17,#35,#53,#85]"
 
+    # Find atoms directly bonded to the metal center
     coordinating_atoms = [
         int(x) for x in np.nonzero(Chem.rdmolops.GetAdjacencyMatrix(mol)[index, :])[0]
     ]
@@ -831,6 +852,7 @@ def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
     mdis = rdMolStandardize.MetalDisconnector(params)
     mdis.SetMetalNon(Chem.MolFromSmarts(MetalsOfInterest))
     frags = mdis.Disconnect(mol)
+
     frag_mols = list(rdmolops.GetMolFrags(frags, asMols=True, sanitizeFrags=False))
     if verbose:
         print(f"Along with the metal, there are {len(frag_mols)-1} ligands")
@@ -898,7 +920,7 @@ def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fal
         mol.UpdatePropertyCache(strict=False)
 
     tmc_idx = find_metal_index(mol)
-    mol = detect_additional_bonds(mol, index=tmc_idx)
+    mol = detect_additional_bonds(mol)
 
     # Detect and correct special cases
     if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene
@@ -976,7 +998,7 @@ def sanitize_complex(
         add_hydrogens=add_hydrogens,
     )
     tmc_idx = find_metal_index(mol)
-    # Split the ligands from the metal center, note that we are adding a single bonded At to each atom that
+    # Split the ligands from the metal center, note that we are adding a single bond at to each atom that
     # was connected to the metal center.
     frag_mols, coordinating_atoms = cleave_mol_from_index(
         mol, tmc_idx, verbose=verbose, add_atom=add_atom
@@ -1002,8 +1024,13 @@ def sanitize_complex(
         else:  # If the fragment is not the metal center
             if verbose:
                 print(f"Ligand {i+1} of {len(frag_mols)-1}")
+            metal_coordinating_indices = [
+                atm.GetIdx()
+                for atm in m.GetAtoms()
+                if atm.GetIntProp("__original_index") in coordinating_atoms
+            ]
             best_ligand_info = get_ligand_attributes(
-                m, verbose=verbose, add_atom=add_atom
+                m, metal_coordinating_indices, verbose=verbose, add_atom=add_atom
             )
 
             total_xtype += len(best_ligand_info["X-type connectors"])
