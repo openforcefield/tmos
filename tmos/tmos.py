@@ -184,7 +184,7 @@ def check_ligand_exception(mol, metal_coordinating_indices):
 
     """
     mol = Chem.RWMol(copy.deepcopy(mol))
-
+    Chem.SetAromaticity(mol, Chem.AromaticityModel.AROMATICITY_MDL)
     # Assume there is one
     metal_connected_orig_indices = [
         atm.GetIntProp("__original_index")
@@ -314,7 +314,9 @@ def sanitize_ligand(
     Returns:
         mol (rdkit.Chem.rdchem.Mol): RDKit molecule
     """
+
     mol_after = copy.deepcopy(mol)
+    Chem.SetAromaticity(mol_after, Chem.AromaticityModel.AROMATICITY_MDL)
     mol_after.UpdatePropertyCache(strict=False)
     if any(atm.GetNumImplicitHs() > 0 for atm in mol_after.GetAtoms()):
         raise ValueError("Provided molecule has implicit hydrogen atoms.")
@@ -563,6 +565,7 @@ def detect_additional_bonds(mol, index=None):
         RDKit molecule
     """
     mol = Chem.RWMol(copy.deepcopy(mol))
+    Chem.SetAromaticity(mol, Chem.AromaticityModel.AROMATICITY_MDL)
     if mol.GetNumConformers() == 0:
         warnings.warn("Provided molecule does not have any coordinates")
         return mol
@@ -914,6 +917,7 @@ def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fal
     """
 
     mol = Chem.DeleteSubstructs(copy.deepcopy(mol), Chem.MolFromSmarts("[#0]"))
+    Chem.SetAromaticity(mol, Chem.AromaticityModel.AROMATICITY_MDL)
     mol.UpdatePropertyCache(strict=False)
     if add_hydrogens:
         mol = Chem.AddHs(mol, addCoords=True, explicitOnly=True)
@@ -937,7 +941,12 @@ def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fal
 
 
 def sanitize_complex(
-    mol, verbose=False, value_missing_coord=0, add_hydrogens=False, add_atom="I"
+    mol,
+    verbose=False,
+    value_missing_coord=0,
+    add_hydrogens=False,
+    add_atom="I",
+    sanitize=True,
 ):
     """Sanitize ligands, determining X-type and L-type, returning a sanitized complex with
     oxidation state, number of electrons, and metal formal charge.
@@ -957,6 +966,8 @@ def sanitize_complex(
         If True, add explicit hydrogens to the structure if needed.
     add_atom : str, optional, default='I'
         Element symbol of the "dummy atom" used in :func:`cleave_mol_from_index`
+    sanitize : bool, optional, default=True
+        If True, the final complex will be sanitized with :func:`sanitize_molecule`
 
     Raises
     ------
@@ -1052,6 +1063,7 @@ def sanitize_complex(
             lig_info,
             coordinating_atoms,
             tm_charge=tm_chg,
+            sanitize=sanitize,
         )
         metal_symbol = tmp_tm_mol.GetAtoms()[0].GetSymbol()
         charge = sum([a.GetFormalCharge() for a in tmc_mol.GetAtoms()])
@@ -1086,7 +1098,9 @@ def sanitize_complex(
     return outputs
 
 
-def reform_metal_complex(tm_mol, lig_info, coordinating_atoms, tm_charge=0):
+def reform_metal_complex(
+    tm_mol, lig_info, coordinating_atoms, tm_charge=0, sanitize=True
+):
     """Reconnects ligands to a transition metal center to reform a metal complex.
 
     This function takes a transition metal molecule and a list of ligand molecules,
@@ -1103,6 +1117,8 @@ def reform_metal_complex(tm_mol, lig_info, coordinating_atoms, tm_charge=0):
         List of atom indices (from the original complex) that should be reconnected to the metal center.
     tm_charge : int, optional, default=0
         Formal charge of the transition metal center.
+    sanitize : bool, optional, default=True
+        If True, will sanitize the final complex with :func:`sanitize_molecule`
 
     Returns
     -------
@@ -1166,6 +1182,7 @@ def reform_metal_complex(tm_mol, lig_info, coordinating_atoms, tm_charge=0):
             )
         tmc_mol.AddBond(i, tm_idx, bond_type)
 
-    sanitize_molecule(tmc_mol)
+    if sanitize:
+        sanitize_molecule(tmc_mol)
 
     return tmc_mol
