@@ -10,6 +10,7 @@ Such functions include:
 import copy
 import warnings
 import itertools
+import os
 
 import numpy as np
 from deepdiff import DeepDiff
@@ -25,7 +26,6 @@ import periodictable
 from MDAnalysis.converters.RDKitInferring import MDAnalysisInferrer
 from openbabel import openbabel as ob
 
-
 from .utils import first_traceback, get_molecular_formula
 from .graph_mapping import (
     find_atom_mapping,
@@ -39,6 +39,11 @@ from .reference_values import (
     transition_metal_covalent_radii,
     METALS_NUM,
 )
+
+# Suppress all OpenBabel output including stereochemistry errors
+ob.obErrorLog.SetOutputLevel(0)
+ob.obErrorLog.StopLogging()
+os.environ["BABEL_SILENCE"] = "1"
 
 RDLogger.DisableLog("rdApp.*")
 pt = GetPeriodicTable()
@@ -101,7 +106,10 @@ def get_atom_charge(atom, ignore_multiple_charges=True, use_formal_charge=False)
                 f"can have multiple charge states {charge}"
             )
 
-    return min(charge)
+    min_charge = min(charge)
+    if abs(min_charge - round(min_charge)) < np.finfo(float).eps:
+        return int(round(min_charge))
+    return min_charge
 
 
 def assess_atoms(mol, add_atom=None, use_formal_charge=False):
