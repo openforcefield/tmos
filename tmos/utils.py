@@ -7,11 +7,50 @@ import re
 
 import numpy as np
 import py3Dmol
+from loguru import logger
 
 from rdkit import Chem
 from rdkit.Chem.Draw import IPythonConsole
 
 IPythonConsole.molSize = 500, 500
+
+
+def configure_logger(level="INFO"):
+    """Configure the loguru logger with a specified level.
+
+    This function should be called once at the start of the application to set up
+    logging configuration. It removes the default handler and adds a new one with
+    the specified level. Can also be called later to change the logging level.
+
+    Parameters
+    ----------
+    level : str, optional
+        Logging level to use. Valid options are: "TRACE", "DEBUG", "INFO",
+        "SUCCESS", "WARNING", "ERROR", "CRITICAL". Default is "INFO".
+
+    Examples
+    --------
+    # Set to INFO level (default) - typically called automatically on import
+    configure_logger()
+
+    # Change to DEBUG level for more verbose output
+    configure_logger("DEBUG")
+
+    # Change to WARNING level for less verbose output
+    configure_logger("WARNING")
+    """
+    # Remove default handler
+    logger.remove()
+
+    # Add new handler with specified level
+    logger.add(
+        sink=lambda msg: print(msg, end=""),
+        level=level,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+        "<level>{message}</level>",
+    )
 
 
 def save_to_json(result, filename, indent=4):

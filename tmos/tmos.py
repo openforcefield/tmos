@@ -5,9 +5,9 @@ an arrow pushing script is produced here with custom checks for ferrocene struct
 """
 
 import copy
-import warnings
 from itertools import combinations
 
+from loguru import logger
 import numpy as np
 
 from rdkit import Chem
@@ -17,7 +17,7 @@ from rdkit.Geometry import Point3D
 from rdkit import RDLogger
 from rdkit.Chem import rdMolDescriptors
 
-from .utils import get_molecular_formula
+from .utils import get_molecular_formula, configure_logger
 from . import build_rdmol as brd
 from .reference_values import (
     bond_type_dict,
@@ -26,6 +26,9 @@ from .reference_values import (
     group_numbers,
 )
 from .geometry import get_geometry_from_mol
+
+# Initialize logger with INFO level by default
+configure_logger("INFO")
 
 RDLogger.DisableLog("rdApp.*")
 pt = GetPeriodicTable()
@@ -258,7 +261,7 @@ def determine_bonds(mol):
     mol = copy.deepcopy(mol)
     new_mol = brd.determine_bonds_openbabel(mol, return_implicit_Hs=True)
     if new_mol is None:
-        #        print("Try MDAnalysis bond determination")
+        logger.debug("Try MDAnalysis bond determination")
         new_mol = brd.determine_bonds_mda(mol)
     else:
         new_mol = brd.update_atom_bond_props(copy.deepcopy(mol), new_mol)
@@ -281,7 +284,6 @@ def sanitize_ligand(
     tool="hybrid",
     charge=0,
     sanitize=True,
-    verbose=False,
 ):
     """Delete atoms from a molecule and then redetermine bond orders.
 
@@ -308,8 +310,6 @@ def sanitize_ligand(
         If using RDKit for bond orders, optionally set the charge. If set to 0, some atoms may be defined as radicals.
     sanitize : bool, optional, default=True
         If True, the resulting molecule will be sanitized
-    verbose : bool, optional, default=False
-        Whether RDKit failure is returned
 
     Returns:
         mol (rdkit.Chem.rdchem.Mol): RDKit molecule
@@ -335,7 +335,7 @@ def sanitize_ligand(
     if tool.lower() == "mdanalysis":
         mol_after = brd.determine_bonds_mda(mol_after)
     elif tool.lower() == "rdkit":
-        mol_after = brd.determine_bonds_rdkit(mol_after, charge=charge, verbose=verbose)
+        mol_after = brd.determine_bonds_rdkit(mol_after, charge=charge)
     elif tool.lower() == "openbabel":
         mol_tmp = brd.determine_bonds_openbabel(mol_after, return_implicit_Hs=True)
         mol_after = (
@@ -359,7 +359,7 @@ def sanitize_ligand(
                     mol_after, sanitize_kekulize=True
                 )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
             except Exception:
-                warnings.warn("RDKit sanitize failed, passing molecule as is.")
+                logger.warning("RDKit sanitize failed, passing molecule as is.")
 
     return mol_after
 
@@ -367,7 +367,6 @@ def sanitize_ligand(
 def get_ligand_attributes(
     ligand_mol,
     metal_coordinating_indices,
-    verbose=False,
     add_atom=None,
     add_hydrogens=False,
 ):
@@ -382,8 +381,6 @@ def get_ligand_attributes(
     metal_coordinating_indices : list[int]
         List of atom indices in ligand_mol that were connected to the metal. It is expected that they
         have a Internal Property, __original_index as well.
-    verbose : bool, optional, default=False
-        If True, print updates.
     add_atom : str, optional, default=None
         If an element symbol, the number of hanging bonds will be the number of this atom type present.
     add_hydrogens : bool, optional, default=False
@@ -417,8 +414,7 @@ def get_ligand_attributes(
         ligand_mol, metal_coordinating_indices
     )
     if tmp_mol is not None:
-        if verbose:
-            print("Ligand exception found.")
+        logger.debug("Ligand exception found.")
         total_charge_after, hanging_bonds_after, charged_atoms_after = brd.assess_atoms(
             tmp_mol
         )
@@ -448,8 +444,7 @@ def get_ligand_attributes(
             ]
             if a1.GetIdx() in dummy_atom_indices
         }
-        if verbose:
-            print(f"There are {len(dummy_atoms)} dummy atoms")
+        logger.debug(f"There are {len(dummy_atoms)} dummy atoms")
 
         dummy_atom_combinations = []
         for k in range(len(dummy_atoms), -1, -1):
@@ -469,14 +464,13 @@ def get_ligand_attributes(
                     "hanging_bonds": hanging_bonds_after,
                     "charged_atoms": charged_atoms_after,
                 }
-                if verbose and len(charged_atoms_after) < 6:
-                    print("___________________________________________________")
-                    print(f"{j}:", total_charge_after, hanging_bonds_after)
+                if len(charged_atoms_after) < 6:
+                    logger.debug("___________________________________________________")
+                    logger.debug(f"{j}:", total_charge_after, hanging_bonds_after)
                     for ind, tmp in charged_atoms_after.items():
-                        print("    ", ind, tmp)
+                        logger.debug("    ", ind, tmp)
             else:
-                if verbose:
-                    print("Sanitize failed")
+                logger.debug("Sanitize failed")
 
         # Filter prospective ligands
         if not ligand_prospects:
@@ -504,13 +498,12 @@ def get_ligand_attributes(
             )
         ]
 
-    if verbose:
-        print(
-            f"Total ligand charge: {ligand_best['total_charge']}, N_Hanging Bonds {ligand_best['hanging_bonds']}"
-        )
-        print("Charged atom info:")
-        for x, y in ligand_best["charged_atoms"].items():
-            print(f"    {x}: {y}")
+    logger.debug(
+        f"Total ligand charge: {ligand_best['total_charge']}, N_Hanging Bonds {ligand_best['hanging_bonds']}"
+    )
+    logger.debug("Charged atom info:")
+    for x, y in ligand_best["charged_atoms"].items():
+        logger.debug(f"    {x}: {y}")
 
     ligand_best["smiles"] = mol_to_smiles(ligand_best["rdmol"])
     ligand_best["chemical_formula"] = get_molecular_formula(ligand_best["rdmol"])
@@ -567,7 +560,7 @@ def detect_additional_bonds(mol, index=None):
     mol = Chem.RWMol(copy.deepcopy(mol))
     Chem.SetAromaticity(mol, Chem.AromaticityModel.AROMATICITY_MDL)
     if mol.GetNumConformers() == 0:
-        warnings.warn("Provided molecule does not have any coordinates")
+        logger.warning("Provided molecule does not have any coordinates")
         return mol
 
     symbols = [a.GetSymbol() for a in mol.GetAtoms()]
@@ -808,7 +801,7 @@ def get_tm_attributes(tm_mol, n_ltype, n_xtype, n_electrons=18):
     return oxidation_states, charges, electron_counts
 
 
-def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
+def cleave_mol_from_index(mol, index, add_atom=None):
     """Given an atomic index of an RDKit molecule, cleave the attaching bonds and return the resulting molecules
 
     The original atom index that corresponds to the output, `coordinating_atoms`, can be accessed with the atom
@@ -822,8 +815,6 @@ def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
         RDKit molecule
     index : int
         Index of atom to cleave from neighbors
-    verbose : bool, optional, default=False
-        If True, provide the number of resulting rdkit molecules
     add_atom : str, optional, default=None
         If not None, add an atom of this type in place of the metal center
 
@@ -857,8 +848,7 @@ def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
     frags = mdis.Disconnect(mol)
 
     frag_mols = list(rdmolops.GetMolFrags(frags, asMols=True, sanitizeFrags=False))
-    if verbose:
-        print(f"Along with the metal, there are {len(frag_mols)-1} ligands")
+    logger.debug(f"Along with the metal, there are {len(frag_mols)-1} ligands")
 
     ind_metal = [
         ii
@@ -895,7 +885,7 @@ def cleave_mol_from_index(mol, index, verbose=False, add_atom=None):
     return frag_mols, coordinating_atoms
 
 
-def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=False):
+def prepare_complex(mol, value_missing_coord=0, add_hydrogens=False):
     """Prepare complex removing anomalous substructs, adding additional metal connections,
     checking for missing coordinates, and possible addition of hydrogens.
 
@@ -903,8 +893,6 @@ def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fal
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule representing the transition metal complex.
-    verbose : bool, optional, default=False
-        If True, print updates during processing.
     value_missing_coord : float, optional, default=0
         Value used to detect missing coordinates (e.g., 0 for (0,0,0)).
     add_hydrogens : bool, optional, default=False
@@ -928,8 +916,7 @@ def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fal
 
     # Detect and correct special cases
     if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene
-        if verbose:
-            print("Detect ferrocene!")
+        logger.debug("Detect ferrocene!")
         mol, tmc_idx = correct_ferrocene(mol, tmc_idx)
 
     missing_coord_indices = find_missing_coords(mol, value=value_missing_coord)
@@ -942,7 +929,6 @@ def prepare_complex(mol, verbose=False, value_missing_coord=0, add_hydrogens=Fal
 
 def sanitize_complex(
     mol,
-    verbose=False,
     value_missing_coord=0,
     add_hydrogens=False,
     add_atom="I",
@@ -958,8 +944,6 @@ def sanitize_complex(
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule representing the transition metal complex.
-    verbose : bool, optional, default=False
-        If True, print updates during processing.
     value_missing_coord : float, optional, default=0
         Value used to detect missing coordinates (e.g., 0 for (0,0,0)).
     add_hydrogens : bool, optional, default=False
@@ -1004,7 +988,6 @@ def sanitize_complex(
 
     mol = prepare_complex(
         copy.deepcopy(mol),
-        verbose=verbose,
         value_missing_coord=value_missing_coord,
         add_hydrogens=add_hydrogens,
     )
@@ -1012,7 +995,7 @@ def sanitize_complex(
     # Split the ligands from the metal center, note that we are adding a single bond at to each atom that
     # was connected to the metal center.
     frag_mols, coordinating_atoms = cleave_mol_from_index(
-        mol, tmc_idx, verbose=verbose, add_atom=add_atom
+        mol, tmc_idx, add_atom=add_atom
     )
     geometry, n_bonds = get_geometry_from_mol(mol, tmc_idx)
 
@@ -1033,15 +1016,14 @@ def sanitize_complex(
                 tm_mol = Chem.RWMol(frag_mols[i])
                 break
         else:  # If the fragment is not the metal center
-            if verbose:
-                print(f"Ligand {i+1} of {len(frag_mols)-1}")
+            logger.debug(f"Ligand {i+1} of {len(frag_mols)-1}")
             metal_coordinating_indices = [
                 atm.GetIdx()
                 for atm in m.GetAtoms()
                 if atm.GetIntProp("__original_index") in coordinating_atoms
             ]
             best_ligand_info = get_ligand_attributes(
-                m, metal_coordinating_indices, verbose=verbose, add_atom=add_atom
+                m, metal_coordinating_indices, add_atom=add_atom
             )
 
             total_xtype += len(best_ligand_info["X-type connectors"])

@@ -8,7 +8,7 @@ Such functions include:
 """
 
 import copy
-import warnings
+from loguru import logger
 import itertools
 import os
 
@@ -194,11 +194,11 @@ def assess_atoms(mol, add_atom=None, use_formal_charge=False):
             if tmp_hanging_bonds > 0:
                 hanging_bonds += tmp_hanging_bonds
             elif tmp_hanging_bonds < 0:  # Excess of bonds
-                warnings.warn(
+                logger.debug(
                     f"Atom {a.GetIdx()}, {a.GetSymbol()}, should have a +{-tmp_hanging_bonds} charge."
                 )
             elif tmp_hanging_bonds % 1 > np.finfo(float).eps:
-                warnings.warn("Hanging bond is not an integer value")
+                logger.debug("Hanging bond is not an integer value")
 
     return total_charge, int(hanging_bonds), charged_atoms
 
@@ -218,7 +218,7 @@ def update_formal_charges(mol):
             continue
         charge = get_atom_charge(atm)
         if np.finfo(float).eps < abs(charge) < 1 - np.finfo(float).eps:
-            warnings.warn(
+            logger.warning(
                 f"Atom has a fractional charge {charge} (aromatic), setting to 0"
             )
             atm.SetFormalCharge(0)
@@ -554,15 +554,13 @@ def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.1):
 #############################################################################
 
 
-def determine_bonds_mda(mol, verbose=False):
+def determine_bonds_mda(mol):
     """Determine bond orders with MDAnalysis, or None if failed.
 
     Parameters
     ----------
     mol : rdkit.Chem.Mol
         RDKit molecule that needs to be updated
-    verbose : bool, optional, default=False
-        If True and an error in bond determination occurs, the primary traceback is printed.
 
     Returns
     -------
@@ -602,18 +600,17 @@ def determine_bonds_mda(mol, verbose=False):
             len(DeepDiff(charged_atoms_before, charged_atoms_after)) == 0
             and totalcharge != 0
         ):
-            warnings.warn("MDAnalysis failed to determine molecular bond orders.")
+            logger.warning("MDAnalysis failed to determine molecular bond orders.")
             mol = None
     except Exception:
-        if verbose:
-            warnings.warn(first_traceback())
-        warnings.warn("MDAnalysis failed to determine molecular bond orders.")
+        logger.debug(first_traceback())
+        logger.warning("MDAnalysis failed to determine molecular bond orders.")
         mol = None
 
     return mol
 
 
-def determine_bonds_rdkit(mol, charge=0, verbose=False):
+def determine_bonds_rdkit(mol, charge=0):
     """Determine bond orders with RDKit, or None if failed.
 
     Parameters
@@ -622,8 +619,6 @@ def determine_bonds_rdkit(mol, charge=0, verbose=False):
         RDKit molecule that needs to be updated
     charge : int
         Set the charge of the molecule when determining the bond orders
-    verbose : bool, optional, default=False
-        If True and an error in bond determination occurs, the primary traceback is printed.
 
     Returns
     -------
@@ -641,15 +636,14 @@ def determine_bonds_rdkit(mol, charge=0, verbose=False):
             mol, charge=charge, maxIterations=1000, allowChargedFragments=False
         )
     except Exception:
-        if verbose:
-            warnings.warn(first_traceback())
-        warnings.warn("RDKit failed to determine molecular bond orders.")
+        logger.debug(first_traceback())
+        logger.warning("RDKit failed to determine molecular bond orders.")
         mol = None
 
     return mol
 
 
-def determine_bonds_openbabel(mol, return_implicit_Hs=False, verbose=False):
+def determine_bonds_openbabel(mol, return_implicit_Hs=False):
     """Determine bond orders with Open Babel, or None if failed.
 
     Note that atom properties may have been lost and the default from openbabel is to
@@ -663,8 +657,6 @@ def determine_bonds_openbabel(mol, return_implicit_Hs=False, verbose=False):
     return_implicit_Hs : bool, optional, default=False
         If False, the inherent implicit hydrogens from the openbabel process are added back with
         approximated coordinates.
-    verbose : bool, optional, default=False
-        If True and an error in bond determination occurs, the primary traceback is printed.
 
     Returns
     -------
@@ -682,9 +674,8 @@ def determine_bonds_openbabel(mol, return_implicit_Hs=False, verbose=False):
     try:
         mol_no_H = Chem.RemoveHs(mol)  # PerceiveBondOrders requires implicit Hs
     except Chem.rdchem.AtomValenceException:
-        if verbose:
-            warnings.warn(first_traceback())
-        warnings.warn(
+        logger.debug(first_traceback())
+        logger.warning(
             "RDKit sanitize failed to remove hydrogens in preparing for OpenBabel."
         )
         mol_openbabel = None
@@ -703,7 +694,7 @@ def determine_bonds_openbabel(mol, return_implicit_Hs=False, verbose=False):
         mol_openbabel = Chem.MolFromMolBlock(mol_block_processed, sanitize=False)
 
     if mol_openbabel is None:
-        warnings.warn("Openbabel failed to determine molecular bond orders.")
+        logger.warning("Openbabel failed to determine molecular bond orders.")
     else:
         if not return_implicit_Hs:
             mol_openbabel = Chem.AddHs(
@@ -788,7 +779,7 @@ def update_atom_bond_props(mol_to_change, mol_reference, sanitize=True):
                 ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY,
             )
         except Chem.rdchem.AtomValenceException:
-            warnings.warn("RDKit sanitize failed, passing molecule as is.")
+            logger.warning("RDKit sanitize failed, passing molecule as is.")
 
     return mol_to_change
 

@@ -3,6 +3,7 @@
 from collections import defaultdict
 
 import networkx as nx
+from loguru import logger
 
 
 def mol_to_graph(mol):
@@ -275,7 +276,7 @@ def find_molecular_rings(mol_graph, min_ring_size=3, max_ring_size=12):
                 cycles.append(normalized_cycle)
 
     except Exception as e:
-        print(f"Error finding cycles: {e}")
+        logger.info(f"Error finding cycles: {e}")
         return []
 
     # Remove duplicates and sort by ring size

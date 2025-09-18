@@ -1,6 +1,5 @@
-import warnings
-
 import numpy as np
+from loguru import logger
 
 from .reference_values import ideal_angles
 
@@ -48,7 +47,7 @@ def get_distance(mol, ind1, ind2):
 
 
 def get_geometry_from_xyz(
-    positions, central_idx, r_cut=2.5, tol=15, verbose=False, ignore_scale=False
+    positions, central_idx, r_cut=2.5, tol=15, ignore_scale=False
 ):
     """Determine the bonded geometry of a central atom based on atomic positions from xyz coordinates.
 
@@ -62,8 +61,6 @@ def get_geometry_from_xyz(
         Distance cutoff (in Å) to filter neighboring atoms. Defaults to 2.5.
     tol : float, optional
         Tolerance for angle comparison in degrees. Defaults to 15.
-    verbose : bool, optional
-        If True, prints additional debugging information. Defaults to False.
     ignore_scale : bool, optional
         If True, ignores the warning when the minimum bond is not between 0.8 and 1.5 Å.
 
@@ -134,10 +131,9 @@ def get_geometry_from_xyz(
             for key, value in ideal_angles[n].items()
         }
         geometry = min(scores, key=scores.get)
-        if verbose:
-            print(scores)
+        logger.debug(f"Geometry scores: {scores}")
         if scores[geometry] > tol:
-            print(
+            logger.info(
                 f"This {n}-coordinate center is closest to {geometry} but not within tolerance."
             )
             return "Undetermined", n
@@ -145,7 +141,7 @@ def get_geometry_from_xyz(
             return geometry, n
 
 
-def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
+def get_geometry_from_mol(mol, central_idx, tol=15):
     """
     Determine the bonded geometry of a central atom based on atomic positions from an RDKit molecule.
 
@@ -157,8 +153,6 @@ def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
         Index of the central atom in the molecule.
     tol : float, optional, default=15
         Tolerance for angle comparison in degrees.
-    verbose : bool, optional, default=False
-        If True, prints additional debugging information.
 
     Returns
     -------
@@ -214,10 +208,9 @@ def get_geometry_from_mol(mol, central_idx, tol=15, verbose=False):
             for key, value in ideal_angles[n].items()
         }
         geometry = min(scores, key=scores.get)
-        if verbose:
-            print(scores)
+        logger.debug(scores)
         if scores[geometry] > tol:
-            warnings.warn(
+            logger.warning(
                 f"This {n}-coordinate center is closest to {geometry} but not within tolerance."
             )
             return "Undetermined", n
