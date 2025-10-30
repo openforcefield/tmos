@@ -1,9 +1,12 @@
 """General utilities"""
 
+import os
+import sys
 import traceback
 from collections import defaultdict
 import json
 import re
+from contextlib import contextmanager
 
 import numpy as np
 import py3Dmol
@@ -51,6 +54,21 @@ def configure_logger(level="INFO"):
         "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
         "<level>{message}</level>",
     )
+
+
+@contextmanager
+def suppress_stdout_stderr():
+    """Context manager to suppress stdout and stderr."""
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        try:
+            sys.stdout = devnull
+            sys.stderr = devnull
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
 
 def save_to_json(result, filename, indent=4):
@@ -147,7 +165,7 @@ def molecular_formula_to_dict(formula):
     return formula_dict
 
 
-def view3D(molecule, label_idx=False, label_symbol=False, kekulize=True):
+def view3D(molecule, label_idx=False, label_symbol=False, kekulize=True, indices=[]):
     """
     Format 3D view of an RDKit molecule.
 
@@ -161,6 +179,8 @@ def view3D(molecule, label_idx=False, label_symbol=False, kekulize=True):
         If True, atom symbol will be displayed as labels. Default is False.
     kekulize : bool, optional
         If True, kekulize the molecule before rendering. Default is True.
+    indices : list, optional
+        If indices are provided, only those atoms are labeled
 
     Returns
     -------
@@ -190,7 +210,11 @@ def view3D(molecule, label_idx=False, label_symbol=False, kekulize=True):
     if label_func:
         for i, atom in enumerate(mol.GetAtoms()):
             pos = mol.GetConformer().GetAtomPosition(i)
-            label = label_func(i, atom)
+            label = (
+                label_func(i, atom)
+                if (indices and i in indices) or not indices
+                else None
+            )
             if label:
                 view.addLabel(
                     label,

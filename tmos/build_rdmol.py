@@ -11,6 +11,7 @@ import copy
 from loguru import logger
 import itertools
 import os
+from collections import defaultdict
 
 import numpy as np
 from deepdiff import DeepDiff
@@ -45,6 +46,7 @@ ob.obErrorLog.SetOutputLevel(0)
 ob.obErrorLog.StopLogging()
 os.environ["BABEL_SILENCE"] = "1"
 
+# Disable all RDKit logging
 RDLogger.DisableLog("rdApp.*")
 pt = GetPeriodicTable()
 
@@ -190,7 +192,7 @@ def assess_atoms(mol, add_atom=None, use_formal_charge=False):
                     for b in a.GetBonds()
                 ],
             }
-            tmp_hanging_bonds = -get_atom_charge(a, use_formal_charge=True)
+            tmp_hanging_bonds = -get_atom_charge(a)  # , use_formal_charge=True)
             if tmp_hanging_bonds > 0:
                 hanging_bonds += tmp_hanging_bonds
             elif tmp_hanging_bonds < 0:  # Excess of bonds
@@ -218,7 +220,7 @@ def update_formal_charges(mol):
             continue
         charge = get_atom_charge(atm)
         if np.finfo(float).eps < abs(charge) < 1 - np.finfo(float).eps:
-            logger.warning(
+            logger.debug(
                 f"Atom has a fractional charge {charge} (aromatic), setting to 0"
             )
             atm.SetFormalCharge(0)
@@ -307,7 +309,11 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_toleranc
 
     mol = mol.GetMol()
     try:
-        Chem.SanitizeMol(mol)
+        Chem.SanitizeMol(
+            mol,
+            sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
+            ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY,
+        )
     except Exception:  # Doesn't always work for metal complexes
         pass
 
@@ -373,7 +379,7 @@ def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1, ignore_scale=False)
         Chem.SanitizeMol(
             mol,
             sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
-            ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY,  # Needed for porphyrins
+            ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY,
         )
     except Exception:  # Doesn't always work for metal complexes
         pass
@@ -554,6 +560,161 @@ def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.1):
 #############################################################################
 
 
+def get_connections(mol, indices=None):
+    """Get atom connectivity descriptors grouped by element symbol and degree.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        RDKit molecule object.
+    indices : list, optional
+        Atom indices to analyze. If None, analyzes all atoms.
+
+    Returns
+    -------
+    dict
+        Keys are (element_symbol, degree) tuples, values are lists of atom indices.
+    """
+    atoms = (
+        mol.GetAtoms()
+        if indices is None
+        else [a for a in mol.GetAtoms() if a.GetIdx() in indices]
+    )
+    descriptors = defaultdict(list)
+    for a in atoms:
+        descriptors[(a.GetSymbol(), a.GetDegree())].append(a.GetIdx())
+
+    return descriptors
+
+
+def case_carbon_nitrogen_rings(mol):
+    aromatic_bonds = []
+    positive_charge = []
+    rings = find_molecular_rings(mol_to_graph(mol), min_ring_size=6, max_ring_size=6)
+    logger.debug(f"There are {len(rings)} 6-member rings")
+    for ring in rings:
+        ac = get_connections(mol, ring)
+        if (
+            len(ac[("C", 3)]) == 6
+            or (len(ac[("C", 3)]) == 5 and (len(ac[("N", 3)]) + len(ac[("N", 2)]) == 1))
+            or (len(ac[("C", 3)]) == 4 and (len(ac[("N", 3)]) + len(ac[("N", 2)]) == 2))
+        ):
+            aromatic_bonds.extend(
+                [sorted(ring[x - 1 : x + 1]) for x in range(1, len(ring))]
+                + [sorted([ring[-1], ring[0]])]
+            )
+            if len(ac[("N", 3)]) == 1:
+                positive_charge.append(ac[("N", 3)][0])
+
+    logger.info(f"There are {len(aromatic_bonds)} aromatic bonds")
+    _, _, charged_atoms_before = assess_atoms(mol)
+    for i, bond in enumerate(mol.GetBonds()):
+        atm1, atm2 = bond.GetBeginAtom(), bond.GetEndAtom()
+        pair = sorted([atm1.GetIdx(), atm2.GetIdx()])
+        if (
+            pair in aromatic_bonds
+            and atm1.GetIdx() in charged_atoms_before
+            and atm2.GetIdx() in charged_atoms_before
+        ):
+            adjacent_bonds = [
+                b for b in aromatic_bonds if len(set(pair).intersection(b)) > 0
+            ]
+            if any(
+                mol.GetBondBetweenAtoms(*b).GetBondTypeAsDouble() == 2.0
+                for b in adjacent_bonds
+            ):
+                bond_order = 1
+            else:
+                bond_order = 2
+            bond.SetBondType(bond_type_dict[bond_order])
+
+    logger.info(f"There are {len(positive_charge)} charged atoms")
+    for idx in positive_charge:
+        mol.GetAtoms()[idx].SetFormalCharge(1)
+
+    mol.UpdatePropertyCache(strict=False)
+
+
+def case_nitro(mol):
+    """
+    Identify nitro groups (*~N(~O)~O) in the molecule and set them to *-[N+](=O)-[O-],
+    excluding cases where the nitro group is part of *~N(~O)~OH.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        RDKit molecule to modify in place.
+
+    Returns
+    -------
+    None
+        The molecule is modified in place.
+    """
+    nitro_pattern = Chem.MolFromSmarts("[N;X3](~[O;X1])~[O;X1]")
+    matches = mol.GetSubstructMatches(nitro_pattern)
+    for match in matches:
+        central_nitrogen, oxygen1, oxygen2 = match
+
+        nitrogen_atom = mol.GetAtomWithIdx(central_nitrogen)
+        nitrogen_atom.SetFormalCharge(1)
+        nitrogen_atom.SetNoImplicit(True)
+
+        bond1 = mol.GetBondBetweenAtoms(central_nitrogen, oxygen1)
+        bond2 = mol.GetBondBetweenAtoms(central_nitrogen, oxygen2)
+        if bond2.GetBondType() == Chem.BondType.DOUBLE:
+            bond1, bond2 = bond2, bond1
+            oxygen1, oxygen2 = oxygen2, oxygen1
+
+        oxygen_atom1 = mol.GetAtomWithIdx(oxygen1)
+        oxygen_atom1.SetFormalCharge(0)
+        bond1.SetBondType(Chem.BondType.DOUBLE)
+
+        oxygen_atom2 = mol.GetAtomWithIdx(oxygen2)
+        oxygen_atom2.SetFormalCharge(-1)
+        bond2.SetBondType(Chem.BondType.SINGLE)
+
+    mol.UpdatePropertyCache(strict=False)
+
+
+def set_special_cases(mol):
+    """Set aromatic bonds and formal charges for special molecular cases.
+
+    This is to be run before bond determination
+
+    Identifies:
+    1. 6-membered carbon rings: Sets aromatic bond types
+    2. Pyridine-like rings: Sets aromatic bond types
+    3. Quaternary nitrogens: Assigns positive charges
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        RDKit molecule to modify in place.
+    """
+    mol = copy.deepcopy(mol)
+    mol.UpdatePropertyCache(strict=False)
+    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
+        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+
+    case_nitro(mol)
+    case_carbon_nitrogen_rings(mol)
+
+    # Set positive charge: Nitrogen with 4 connections
+    positive_charges = get_connections(mol)[("N", 4)]
+    logger.info(f"There are {len(positive_charges)} charged atoms")
+    for idx in positive_charges:
+        mol.GetAtoms()[idx].SetFormalCharge(1)
+
+    mol.UpdatePropertyCache(strict=False)
+
+    return mol
+
+
+def correct_special_cases(mol):
+    # Resolve the following CCD structures: 'KHK', 'N7H', 'NTE', 'NXC', 'SXC', 'T8K', 'U0J', 'VL2'
+    case_nitro(mol)
+
+
 def determine_bonds_mda(mol):
     """Determine bond orders with MDAnalysis, or None if failed.
 
@@ -568,31 +729,12 @@ def determine_bonds_mda(mol):
         New RDKit molecule from mdanalysis determination of bond orders. Note that atom
         properties may have been lost. Returns None if bond determination failed.
     """
-    mol = copy.deepcopy(mol)
-    mol.UpdatePropertyCache(strict=False)
-    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
-        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+    mol = set_special_cases(mol)
     totalcharge, _, charged_atoms_before = assess_atoms(mol)
-    rings = find_molecular_rings(mol_to_graph(mol), min_ring_size=6, max_ring_size=6)
-
-    # Find 6-member rings and set aromatic
-    aromatic_bonds = [
-        sorted(ring[x - 1 : x + 1]) for ring in rings for x in range(1, len(ring))
-    ]
-    aromatic_bonds += [sorted([ring[-1], ring[0]]) for ring in rings if len(ring) > 2]
-    for bond in mol.GetBonds():
-        atm1, atm2 = bond.GetBeginAtom(), bond.GetEndAtom()
-        pair = sorted([atm1.GetIdx(), atm2.GetIdx()])
-        if (
-            pair in aromatic_bonds
-            and atm1.GetIdx() in charged_atoms_before
-            and atm2.GetIdx() in charged_atoms_before
-        ):
-            bond.SetBondType(bond_type_dict[1.5])
 
     try:
         mol = Chem.RWMol(mol)
-        MolBondInferrer = MDAnalysisInferrer(max_iter=2000)
+        MolBondInferrer = MDAnalysisInferrer(max_iter=10000)
         mol = MolBondInferrer(mol)
         _, _, charged_atoms_after = assess_atoms(mol)
 
@@ -600,11 +742,11 @@ def determine_bonds_mda(mol):
             len(DeepDiff(charged_atoms_before, charged_atoms_after)) == 0
             and totalcharge != 0
         ):
-            logger.warning("MDAnalysis failed to determine molecular bond orders.")
+            logger.debug("MDAnalysis failed to determine molecular bond orders.")
             mol = None
     except Exception:
-        logger.debug(first_traceback())
-        logger.warning("MDAnalysis failed to determine molecular bond orders.")
+        logger.trace(first_traceback())
+        logger.debug("MDAnalysis failed to determine molecular bond orders.")
         mol = None
 
     return mol
@@ -626,10 +768,7 @@ def determine_bonds_rdkit(mol, charge=0):
         New RDKit molecule from rdkit determination of bond orders. Note that atom
         properties may have been lost. Returns None if bond determination failed.
     """
-    mol = copy.deepcopy(mol)
-    mol.UpdatePropertyCache(strict=False)
-    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
-        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+    mol = set_special_cases(mol)
     mol = Chem.RWMol(mol)
     try:
         DetermineBondOrders(
@@ -637,13 +776,13 @@ def determine_bonds_rdkit(mol, charge=0):
         )
     except Exception:
         logger.debug(first_traceback())
-        logger.warning("RDKit failed to determine molecular bond orders.")
+        logger.debug("RDKit failed to determine molecular bond orders.")
         mol = None
 
     return mol
 
 
-def determine_bonds_openbabel(mol, return_implicit_Hs=False):
+def determine_bonds_openbabel(mol):
     """Determine bond orders with Open Babel, or None if failed.
 
     Note that atom properties may have been lost and the default from openbabel is to
@@ -654,9 +793,6 @@ def determine_bonds_openbabel(mol, return_implicit_Hs=False):
     ----------
     mol : rdkit.Chem.Mol
         RDKit molecule that needs to be updated
-    return_implicit_Hs : bool, optional, default=False
-        If False, the inherent implicit hydrogens from the openbabel process are added back with
-        approximated coordinates.
 
     Returns
     -------
@@ -664,48 +800,37 @@ def determine_bonds_openbabel(mol, return_implicit_Hs=False):
         New RDKit molecule from openbabel determination of bond orders. Note that atom
         properties may have been lost. Returns None if bond determination failed.
     """
-    mol = copy.deepcopy(mol)
-
-    mol.UpdatePropertyCache(strict=False)
-    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
-        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+    mol = set_special_cases(mol)
     mol = Chem.RWMol(mol)
     mol.UpdatePropertyCache(strict=False)
-    try:
-        mol_no_H = Chem.RemoveHs(mol)  # PerceiveBondOrders requires implicit Hs
-    except Chem.rdchem.AtomValenceException:
-        logger.debug(first_traceback())
-        logger.warning(
-            "RDKit sanitize failed to remove hydrogens in preparing for OpenBabel."
-        )
-        mol_openbabel = None
-    else:
-        obConversion = ob.OBConversion()
-        obConversion.SetInAndOutFormats("mol", "mol")
-        obMol = ob.OBMol()
-        obConversion.ReadString(obMol, Chem.MolToMolBlock(mol_no_H, forceV3000=True))
 
+    obConversion = ob.OBConversion()
+    obConversion.SetInAndOutFormats("mol", "mol")
+    obMol = ob.OBMol()
+    obConversion.ReadString(obMol, Chem.MolToMolBlock(mol, forceV3000=True))
+    for _ in range(5):
         obMol.PerceiveBondOrders()
-        aromatyper = ob.OBAromaticTyper()
-        aromatyper.AssignAromaticFlags(obMol)
-        obMol.PerceiveBondOrders()
-        mol_block_processed = obConversion.WriteString(obMol)
-        # sanitize=False needed for 5 member rings in porphyrins
-        mol_openbabel = Chem.MolFromMolBlock(mol_block_processed, sanitize=False)
+    aromatyper = ob.OBAromaticTyper()
+    aromatyper.AssignAromaticFlags(obMol)
+    obMol.PerceiveBondOrders()
+    mol_block_processed = obConversion.WriteString(obMol)
+    # sanitize=False needed for 5 member rings in porphyrins
+    mol_openbabel = Chem.MolFromMolBlock(mol_block_processed, sanitize=False)
+
+    if mol_openbabel is not None and any(
+        b.GetBondType().name == "UNSPECIFIED" for b in mol_openbabel.GetBonds()
+    ):
+        mol_openbabel = None
 
     if mol_openbabel is None:
-        logger.warning("Openbabel failed to determine molecular bond orders.")
+        logger.debug("Openbabel failed to determine molecular bond orders.")
     else:
-        if not return_implicit_Hs:
-            mol_openbabel = Chem.AddHs(
-                mol_openbabel, addCoords=True, explicitOnly=False
-            )
         mol_openbabel.UpdatePropertyCache(strict=False)
 
     return mol_openbabel
 
 
-def update_atom_bond_props(mol_to_change, mol_reference, sanitize=True):
+def update_atom_bond_props(mol_to_change, mol_reference):
     """Update atom and bond properties of one molecule to match another.
 
     Molecules must either be identical in their atomic composition and connectivity, or the reference may be
@@ -720,8 +845,6 @@ def update_atom_bond_props(mol_to_change, mol_reference, sanitize=True):
         RDKit molecule that needs to be updated
     mol_reference : rdkit.Chem.Mol
         RDKit molecule for reference to update the target molecule
-    sanitize : bool, optional, default=True
-        Sanitize the resulting molecule
 
     Raises
     ------
@@ -771,20 +894,74 @@ def update_atom_bond_props(mol_to_change, mol_reference, sanitize=True):
             if bond.GetBondType() != target_bond_type:
                 bond.SetBondType(target_bond_type)
 
-    if sanitize:
-        try:
-            Chem.SanitizeMol(
-                mol_to_change,
-                sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL
-                ^ Chem.SanitizeFlags.SANITIZE_SETAROMATICITY,
-            )
-        except Chem.rdchem.AtomValenceException:
-            logger.warning("RDKit sanitize failed, passing molecule as is.")
-
+    mol_to_change.UpdatePropertyCache(strict=False)
     return mol_to_change
 
 
-def add_obvious_bonds(mol):
+def update_bond_order(mol, idx1, idx2):
+    """Update the bond order between two atoms and reset their formal charges.
+
+    This function modifies a bond between two atoms by adjusting the bond type
+    based on the current bond order and atom charges, then resets both atoms'
+    formal charges to zero.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        The RDKit molecule object containing the atoms and bond to modify.
+    idx1 : int
+        Index of the first atom in the bond.
+    idx2 : int
+        Index of the second atom in the bond.
+
+    Returns
+    -------
+    None
+        This function modifies the molecule object in-place.
+
+    Raises
+    ------
+    ValueError
+        If the bond order change cannot be rectified due to incompatible
+        bond order and atom charge combination.
+    Notes
+    -----
+    - If no bond exists between the specified atoms, the function returns early.
+    - Aromatic bonds (bond order 1.5) are left unchanged.
+    - After modification, the molecule's property cache is updated.
+    """
+
+    bond = mol.GetBondBetweenAtoms(idx1, idx2)
+    if bond is None:
+        return
+    bo = bond_order_dict[bond.GetBondType().name]
+    atom1 = mol.GetAtomWithIdx(idx1)
+    chg1 = get_atom_charge(atom1)
+    atom2 = mol.GetAtomWithIdx(idx2)
+    if bo == 1.5:
+        return
+    logger.debug(
+        f"Atm1 {atom1.GetSymbol()} Idx: {idx1} Chg: {chg1}; Atm2 {atom2.GetSymbol()} Idx: {idx2} Chg: {get_atom_charge(atom2)}; Bond {bond.GetBondType().name}={bo}"
+    )
+    if bo - chg1 not in bond_type_dict:
+        raise ValueError(
+            f"Bond order change cannot be rectified. Orig Bond Order: {bo}, Atom Charge {chg1}"
+        )
+    elif bo - chg1 == 0:
+        logger.debug(f"No dative bonds! Skipping update between {idx1} and {idx2}")
+        return
+    bond.SetBondType(bond_type_dict[bo - chg1])
+    atom1.SetFormalCharge(0)
+    atom2.SetFormalCharge(0)
+    mol.UpdatePropertyCache(strict=False)
+
+
+def get_bo(mol, idx_a, idx_b):
+    bond = mol.GetBondBetweenAtoms(idx_a, idx_b)
+    return bond_order_dict[bond.GetBondType().name] if bond is not None else None
+
+
+def add_obvious_bonds(mol, degree_of_separation=10):
     """Correct bond order for adjacent atoms with hanging bonds.
 
     Sometimes after the determining bond order analysis (particularly for openbabel)
@@ -795,27 +972,123 @@ def add_obvious_bonds(mol):
     ----------
     mol : rdkit.Chem.Mol
         RDKit molecule to update
+    degree_of_separation : int, optional, default=10
+        Degree of separation between hanging bonds
     """
+
+    # Check adjacent bonds
     mol.UpdatePropertyCache(strict=False)
     _, _, charged_atoms = assess_atoms(mol)
     if charged_atoms:
         atoms_hanging_bonds = [index for index in charged_atoms.keys()]
         pairs = list(itertools.combinations(atoms_hanging_bonds, 2))
         for idx1, idx2 in pairs:
-            bond = mol.GetBondBetweenAtoms(idx1, idx2)
-            if bond is not None:
-                bo = bond_order_dict[bond.GetBondType().name]
-                atom1 = mol.GetAtomWithIdx(idx1)
-                chg1 = get_atom_charge(atom1)
-                atom2 = mol.GetAtomWithIdx(idx2)
-                chg2 = get_atom_charge(atom2)
-                if bo == 1.5 or chg1 != chg2:
-                    continue
-                if bo - chg1 not in bond_type_dict:
-                    raise ValueError(
-                        f"Bond order change cannot be rectified. Orig Bond Order: {bo}, Atom Charge {chg1}"
-                    )
-                bond.SetBondType(bond_type_dict[bo - chg1])
-                atom1.SetFormalCharge(0)
-                atom2.SetFormalCharge(0)
-        mol.UpdatePropertyCache(strict=False)
+            if get_atom_charge(mol.GetAtomWithIdx(idx1)) == get_atom_charge(
+                mol.GetAtomWithIdx(idx2)
+            ):
+                update_bond_order(mol, idx1, idx2)
+
+    # Find conjugated rings
+    tmp_rings = find_molecular_rings(
+        mol_to_graph(mol), min_ring_size=5, max_ring_size=6
+    )
+    rings = []
+    for ring in tmp_rings:
+        ac = get_connections(mol, ring)
+        if (
+            len(ac[("C", 3)]) == 6
+            or (len(ac[("C", 3)]) == 5 and (len(ac[("N", 3)]) + len(ac[("N", 2)]) == 1))
+            or (len(ac[("C", 3)]) == 4 and (len(ac[("N", 3)]) + len(ac[("N", 2)]) == 2))
+            or (len(ac[("C", 3)]) == 5 and sum(len(v) for v in ac.values()) == 5)
+            or (
+                len(ac[("C", 3)]) == 4
+                and sum(len(v) for v in ac.values()) == 5
+                and (len(ac[("N", 3)]) == 1 or len(ac[("N", 2)]) == 1)
+            )
+        ):
+            rings.append(ring)
+    rings_idxs = [atom for ring in rings for atom in ring]
+
+    if degree_of_separation == 1:
+        return
+    _, _, charged_atoms = assess_atoms(mol)
+    if charged_atoms:
+        atoms_hanging_bonds = [
+            index for index, tmp in charged_atoms.items() if abs(tmp["charge"]) == 1
+        ]
+        all_pairs = list(itertools.combinations(atoms_hanging_bonds, 2))
+        pair_distances = []
+        for idx1, idx2 in all_pairs:
+            path = Chem.rdmolops.GetShortestPath(mol, idx1, idx2)
+            # If there are hanging bonds, the first bond in the path will increase in order
+            # To compensate, the second bond in the path must decrease in order, so it must
+            # be greater than a single bond. Check that all bonds expected to increase in order
+            # will do so.
+            skip_path = False
+            chg1 = get_atom_charge(mol.GetAtomWithIdx(idx1))
+            for i, (idx_a, idx_b) in enumerate(zip(path[:-1], path[1:])):
+                bo = get_bo(mol, idx_a, idx_b)
+                if (
+                    ((chg1 < 0 and i % 2 != 0) or (chg1 > 0 and i % 2 == 0))
+                    and (bo is not None and bo <= 1)
+                    and idx_a not in rings_idxs
+                    and idx_b not in rings_idxs
+                ) or len(path) - 1 > degree_of_separation:
+                    skip_path = True
+                    break
+            if skip_path:
+                continue
+            else:
+                pair_distances.append((len(path) - 1, idx1, idx2, path))
+        pair_distances.sort(key=lambda x: x[0])  # shortest first
+
+        # Select pairs ensuring each index appears only once
+        used_indices = set()
+        updated_bonds = set()
+        for _, idx1, idx2, path in pair_distances:
+            if idx1 not in used_indices and idx2 not in used_indices:
+                used_indices.add(idx1)
+                used_indices.add(idx2)
+                if idx1 in rings_idxs:
+                    path = list(path)[::-1]
+                for i in range(len(path) - 1):
+                    bond_key = tuple(sorted([path[i], path[i + 1]]))
+                    if bond_key in updated_bonds:
+                        continue
+                    update_bond_order(mol, path[i], path[i + 1])
+                    updated_bonds.add(bond_key)
+
+                    # Check if either atom is in a ring and update all ring bonds
+                    for ring in rings:
+                        ring = list(ring)
+                        if path[i] in ring or path[i + 1] in ring:
+                            # Rotate the ring to start with either path[i] or path[i+1]
+                            if path[i + 1] in ring:
+                                start_idx = ring.index(path[i + 1])
+                            elif path[i] in ring:
+                                start_idx = ring.index(path[i])
+                            ring = ring[start_idx:] + ring[:start_idx]
+                            chg = get_atom_charge(mol.GetAtomWithIdx(ring[0]))
+                            bo = get_bo(mol, ring[0], ring[-1])
+                            if (chg < 0 and bo == 1) or (
+                                chg > 0 and (bo is not None and bo > 1)
+                            ):
+                                ring = [ring[0]] + ring[1:][::-1]
+
+                            ring_bonds = [
+                                [ring[j], ring[(j + 1) % len(ring)]]
+                                for j in range(len(ring))
+                                if tuple(sorted([ring[j], ring[(j + 1) % len(ring)]]))
+                                not in updated_bonds
+                            ]
+                            for j, (ring_idx1, ring_idx2) in enumerate(ring_bonds):
+                                ring_bond_key = tuple(sorted([ring_idx1, ring_idx2]))
+                                chg1 = get_atom_charge(mol.GetAtomWithIdx(ring_idx1))
+                                chg2 = get_atom_charge(mol.GetAtomWithIdx(ring_idx2))
+                                if (j == len(ring_bonds) - 1 and chg2 == 0) or (
+                                    chg1 == 0 and chg2 == 0
+                                ):
+                                    continue
+
+                                update_bond_order(mol, ring_idx1, ring_idx2)
+                                updated_bonds.add(ring_bond_key)

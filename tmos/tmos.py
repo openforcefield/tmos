@@ -17,7 +17,7 @@ from rdkit.Geometry import Point3D
 from rdkit import RDLogger
 from rdkit.Chem import rdMolDescriptors
 
-from .utils import get_molecular_formula, configure_logger
+from .utils import get_molecular_formula, configure_logger, suppress_stdout_stderr
 from . import build_rdmol as brd
 from .reference_values import (
     bond_type_dict,
@@ -60,16 +60,15 @@ def sanitize_molecule(
 
     sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL
     if not sanitize_aromaticity:
-        sanitize_ops ^= (
-            Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
-        )  # Needed for porphyrins
-    if not sanitize_kekulize:  # Should be True for porphyrins
+        sanitize_ops ^= Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
+    if not sanitize_kekulize:
         sanitize_ops ^= Chem.SanitizeFlags.SANITIZE_KEKULIZE
 
-    Chem.SanitizeMol(
-        mol,
-        sanitizeOps=sanitize_ops,
-    )
+    with suppress_stdout_stderr():
+        Chem.SanitizeMol(
+            mol,
+            sanitizeOps=sanitize_ops,
+        )
 
 
 def compare_fingerprint(mol1, mol2):
@@ -245,6 +244,35 @@ def check_ligand_exception(mol, metal_coordinating_indices):
     return mol, metal_connected_orig_indices
 
 
+def is_coordinate_ring(mol, metal_coordinating_indices):
+    """
+    Determines if a set of metal-coordinating atom indices forms a 5 or 6 member ring in the given molecule.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        The molecule object to analyze.
+    metal_coordinating_indices : list of int
+        A list of atom indices that are coordinating a metal.
+
+    Returns
+    -------
+    bool
+        True if the metal-coordinating indices form a ring in the molecule, False otherwise.
+
+    """
+
+    if len(metal_coordinating_indices) in [5, 6]:
+        Chem.FastFindRings(mol)
+        ring_info = mol.GetRingInfo()
+        for ring in ring_info.AtomRings():
+            if len(ring) != len(metal_coordinating_indices):
+                continue
+            if set(ring) == set(metal_coordinating_indices):
+                return True
+    return False
+
+
 def determine_bonds(mol):
     """Determine bond orders with OpenBabel, with MDA fallback.
 
@@ -259,14 +287,24 @@ def determine_bonds(mol):
         Resulting molecule, or None if the bonds could not be determined for the molecule.
     """
     mol = copy.deepcopy(mol)
-    new_mol = brd.determine_bonds_openbabel(mol, return_implicit_Hs=True)
+    new_mol = brd.determine_bonds_openbabel(mol)
     if new_mol is None:
         logger.debug("Try MDAnalysis bond determination")
         new_mol = brd.determine_bonds_mda(mol)
     else:
         new_mol = brd.update_atom_bond_props(copy.deepcopy(mol), new_mol)
-        _, _, charged_atoms = brd.assess_atoms(new_mol)
-        if len(charged_atoms) > 0:
+        try:
+            for _ in range(3):
+                brd.add_obvious_bonds(new_mol)
+        except Exception:
+            logger.debug("Addition of obvious bonds failed.")
+            new_mol = None
+        else:
+            _, _, charged_atoms = brd.assess_atoms(new_mol)
+
+        if new_mol is None:
+            new_mol = brd.determine_bonds_mda(mol)
+        elif len(charged_atoms) > 0:
             new_mol_2 = brd.determine_bonds_mda(mol)
             if new_mol_2 is not None:
                 _, _, charged_atoms_2 = brd.assess_atoms(new_mol_2)
@@ -316,11 +354,11 @@ def sanitize_ligand(
     """
 
     mol_after = copy.deepcopy(mol)
-    Chem.SetAromaticity(mol_after, Chem.AromaticityModel.AROMATICITY_MDL)
     mol_after.UpdatePropertyCache(strict=False)
     if any(atm.GetNumImplicitHs() > 0 for atm in mol_after.GetAtoms()):
         raise ValueError("Provided molecule has implicit hydrogen atoms.")
     mol_after = Chem.RWMol(mol_after)
+    Chem.SetAromaticity(mol_after, Chem.AromaticityModel.AROMATICITY_MDL)
 
     if wipe:
         mol_after = wipe_molecule(mol_after)
@@ -337,7 +375,7 @@ def sanitize_ligand(
     elif tool.lower() == "rdkit":
         mol_after = brd.determine_bonds_rdkit(mol_after, charge=charge)
     elif tool.lower() == "openbabel":
-        mol_tmp = brd.determine_bonds_openbabel(mol_after, return_implicit_Hs=True)
+        mol_tmp = brd.determine_bonds_openbabel(mol_after)
         mol_after = (
             brd.update_atom_bond_props(mol_after, mol_tmp)
             if mol_tmp is not None
@@ -352,14 +390,21 @@ def sanitize_ligand(
 
     if mol_after is not None:
         mol_after.UpdatePropertyCache(strict=False)
-        brd.add_obvious_bonds(mol_after)
-        if sanitize:
-            try:
-                sanitize_molecule(
-                    mol_after, sanitize_kekulize=True
-                )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
-            except Exception:
-                logger.warning("RDKit sanitize failed, passing molecule as is.")
+        try:
+            for _ in range(3):
+                brd.add_obvious_bonds(mol_after)
+                brd.correct_special_cases(mol_after)
+        except Exception:
+            logger.debug("Addition of obvious bonds failed.")
+            mol_after = None
+        else:
+            if sanitize:
+                try:
+                    sanitize_molecule(
+                        mol_after, sanitize_kekulize=True
+                    )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
+                except Exception:
+                    mol_after = None
 
     return mol_after
 
@@ -446,9 +491,37 @@ def get_ligand_attributes(
         }
         logger.debug(f"There are {len(dummy_atoms)} dummy atoms")
 
-        dummy_atom_combinations = []
-        for k in range(len(dummy_atoms), -1, -1):
-            dummy_atom_combinations.extend([*combinations(dummy_atoms, k)])
+        # Assumes carbon rings
+        if is_coordinate_ring(ligand_mol, metal_coordinating_indices):
+            if len(metal_coordinating_indices) == 6:
+                dummy_atom_combinations = [
+                    dummy_atoms
+                ]  # All dummy atoms should be deleted for a coordinated ring
+            elif len(metal_coordinating_indices) == 5:
+                # Check that all coordinating atoms have exactly 3 bonds (typical for 5-membered aromatic rings)
+                if all(
+                    ligand_mol.GetAtomWithIdx(idx).GetDegree() == 4
+                    for idx in metal_coordinating_indices
+                ):
+                    dummy_atom_combinations = [dummy_atoms[1:]]
+                elif (
+                    sum(
+                        ligand_mol.GetAtomWithIdx(idx).GetDegree() == 4
+                        for idx in metal_coordinating_indices
+                    )
+                    == 4
+                ):
+                    dummy_atom_combinations = [
+                        dummy_atoms
+                    ]  # All dummy atoms should be deleted for a coordinated ring where one atom isn't saturated
+                else:
+                    dummy_atom_combinations = []
+                    for k in range(len(dummy_atoms), -1, -1):
+                        dummy_atom_combinations.extend([*combinations(dummy_atoms, k)])
+        else:
+            dummy_atom_combinations = []
+            for k in range(len(dummy_atoms), -1, -1):
+                dummy_atom_combinations.extend([*combinations(dummy_atoms, k)])
 
         ligand_prospects = {}
         for j, delete_list in enumerate(dummy_atom_combinations):
@@ -574,6 +647,11 @@ def detect_additional_bonds(mol, index=None):
         if mol.GetBondBetweenAtoms(idx1, idx2) is None and (
             index is None or index in [idx1, idx2]
         ):
+            atom1, atom2 = mol.GetAtomWithIdx(idx1), mol.GetAtomWithIdx(idx2)
+            if (atom1.GetSymbol() == "H" and len(atom1.GetBonds()) >= 1) or (
+                atom2.GetSymbol() == "H" and len(atom2.GetBonds()) >= 1
+            ):
+                continue
             mol.AddBond(idx1, idx2, Chem.rdchem.BondType.SINGLE)
     return mol
 
@@ -868,13 +946,10 @@ def cleave_mol_from_index(mol, index, add_atom=None):
             frag = Chem.RWMol(frag)
             new_atom_indices = []
             for idx in add_atom_indices:
-                chg = brd.get_atom_charge(frag.GetAtoms()[idx])
-                n_new_atms = 1 if chg >= 0 else -chg
-                for _ in range(n_new_atms):
-                    new_atom_idx = frag.AddAtom(Chem.Atom(add_atom))
-                    frag.GetAtomWithIdx(new_atom_idx).SetIntProp("__original_index", -1)
-                    new_atom_indices.append(new_atom_idx)
-                    frag.AddBond(idx, new_atom_idx, Chem.BondType.SINGLE)
+                new_atom_idx = frag.AddAtom(Chem.Atom(add_atom))
+                frag.GetAtomWithIdx(new_atom_idx).SetIntProp("__original_index", -1)
+                new_atom_indices.append(new_atom_idx)
+                frag.AddBond(idx, new_atom_idx, Chem.BondType.SINGLE)
 
             frag = frag.GetMol()
             conf = frag.GetConformer()
@@ -997,7 +1072,8 @@ def sanitize_complex(
     frag_mols, coordinating_atoms = cleave_mol_from_index(
         mol, tmc_idx, add_atom=add_atom
     )
-    geometry, n_bonds = get_geometry_from_mol(mol, tmc_idx)
+    geometry_angles, n_bonds = get_geometry_from_mol(mol, tmc_idx, mode="angles")
+    geometry_rylm, _ = get_geometry_from_mol(mol, tmc_idx, mode="rylm")
 
     total_xtype = 0
     total_ltype = 0
@@ -1050,7 +1126,7 @@ def sanitize_complex(
         metal_symbol = tmp_tm_mol.GetAtoms()[0].GetSymbol()
         charge = sum([a.GetFormalCharge() for a in tmc_mol.GetAtoms()])
         outputs[
-            f"{metal_symbol}; {n_bonds}:{geometry}; OS:{tm_ox}; q:{charge}; Nel:{tm_nel}"
+            f"{metal_symbol}; {n_bonds}:{geometry_angles}; OS:{tm_ox}; q:{charge}; Nel:{tm_nel}"
         ] = {
             "metal_info": {
                 "chemical_formula": metal_symbol,
@@ -1067,7 +1143,8 @@ def sanitize_complex(
                 "rdmol": tmc_mol,
                 "oxidation_state": tm_ox,
                 "total_charge": charge,
-                "geometry": geometry,
+                "geometry_from_angles": geometry_angles,
+                "geometry_from_rylm": geometry_rylm,
                 "number_Ltype_connectors": sum(
                     [len(x["L-type connectors"]) for x in lig_info]
                 ),

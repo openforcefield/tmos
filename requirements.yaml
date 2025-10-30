@@ -17,6 +17,7 @@ dependencies:
   - numpy
   - deepdiff
   - py3Dmol
+  - loguru
 
   - pydata-sphinx-theme
   - sphinx-design
