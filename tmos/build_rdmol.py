@@ -256,7 +256,7 @@ def copy_atom_coords(mol1, index1, mol2, index2, confId1=0, confId2=0):
 #############################################################################
 
 
-def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_tolerance=0.1):
+def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_tolerance=0.2):
     """
     Convert a QCElemental molecule to an RDKit molecule.
 
@@ -320,7 +320,9 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_toleranc
     return mol
 
 
-def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1, ignore_scale=False):
+def xyz_to_rdkit(
+    symbols, positions, distance_tolerance=0.2, method="hybrid", ignore_scale=False
+):
     """
     Convert a QCElemental molecule to an RDKit molecule.
 
@@ -335,6 +337,8 @@ def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1, ignore_scale=False)
     ignore_scale : bool, optional, default=False
         If True avoid an error when "H" is present and the minimum atomic distance is not between
         0.8 Å and 1.5 Å.
+    method : str, optional, default="hybrid"
+        Method to determine connectivity in :func:`determine_connectivity`
 
     Returns:
     --------
@@ -373,7 +377,9 @@ def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1, ignore_scale=False)
 
     mol.UpdatePropertyCache(strict=False)
     mol = mol.GetMol()
-    mol = determine_connectivity(mol, distance_tolerance=distance_tolerance)
+    mol = determine_connectivity(
+        mol, distance_tolerance=distance_tolerance, method=method
+    )
     mol.UpdatePropertyCache(strict=False)
     try:
         Chem.SanitizeMol(
@@ -392,7 +398,7 @@ def xyz_to_rdkit(symbols, positions, distance_tolerance=0.1, ignore_scale=False)
 ###############################################################################
 
 
-def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.1):
+def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.2):
     """
     Determine connectivity for molecules, particularly transition metal organometallic complexes.
 
@@ -401,7 +407,7 @@ def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.1):
     rdkit_mol : rdkit.Chem.Mol
         RDKit molecule without bonds
     method : str, optional, default='hybrid'
-        Method to use: 'rdkit', 'openbabel', or 'hybrid' where openbabel is attempted and rdkit
+        Method to use: 'rdkit', 'openbabel', "None", or 'hybrid' where openbabel is attempted and rdkit
         is the fall back.
     distance_tolerance : float, optional, default=0.1
         Additional tolerance for bond distance cutoffs (Angstroms)
@@ -415,6 +421,8 @@ def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.1):
         return _determine_connectivity_openbabel(rdkit_mol)
     elif method == "rdkit":
         return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
+    elif method == "None":
+        return rdkit_mol
     else:
         return _determine_connectivity_hybrid(rdkit_mol, distance_tolerance)
 
@@ -456,26 +464,98 @@ def _get_covalent_radius(symbol, fallback_radius=1.5):
 
 def _is_transition_metal(symbol):
     """Check if an element is a transition metal using periodictable."""
-    try:
-        element = getattr(periodictable, symbol)
-        # Transition metals have d-block elements (groups 3-12)
-        # Plus lanthanides and actinides (f-block)
-        return (
-            (
-                hasattr(element, "group")
-                and element.group is not None
-                and 3 <= element.group <= 12
-            )
-            or (57 <= element.number <= 71)
-            or (89 <= element.number <= 103)
+
+    return symbol in transition_metal_covalent_radii
+
+
+def _correct_sulfonate_phosphate_interaction(mol, distances, r_cut=3.0, dist_frac=0.05):
+    """Identify atoms that should not bond to metal centers.
+
+    Finds indices of atoms that should not be bonded to the metal center either because:
+    1. They are Hydrogen atoms already bonded to something
+    2. They are atoms in central_sym (S, P, C, H) connected to electronegative atoms (O, N)
+       that are significantly closer to the metal (more than dist_frac closer)
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        RDKit molecule
+    distances : numpy.ndarray
+        Distance matrix between all atoms
+    r_cut : float, optional, default=3.0
+        Distance cutoff (in Å) for considering atoms near metals
+    dist_frac : float, optional, default=0.05
+        Fractional distance threshold. If connected electronegative atoms are closer to the metal
+        by more than this fraction, the central atom should not bond to the metal.
+
+    Returns
+    -------
+    block_bond_idx : list
+        Atom indices that should not bond to metals
+    """
+
+    metal_indices = [
+        a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
+    ]
+    electronegative_sym = ["O", "N", "C"]
+    central_sym = [
+        "S",
+        "P",
+        "C",
+        "H",
+        "N",
+    ]  # Ensure bonds aren't mistakenly made with these
+
+    possible_central_atoms = set()
+    possible_elec_neg_idx = set()
+    for metal_idx in metal_indices:
+        for i, atm in enumerate(mol.GetAtoms()):
+            if i != metal_idx and distances[metal_idx, i] <= r_cut:
+                if atm.GetSymbol() in electronegative_sym:
+                    possible_elec_neg_idx.add(i)
+                if atm.GetSymbol() in central_sym:
+                    possible_central_atoms.add(atm)
+
+    block_bond_idx = []
+    for atm in possible_central_atoms:
+        # Block hydrogens that are already bonded to something
+        if atm.GetSymbol() == "H" and atm.GetDegree() > 0:
+            block_bond_idx.append(atm.GetIdx())
+            continue
+
+        # Find closest metal to this atom
+        metal_idx = min(metal_indices, key=lambda m: distances[m, atm.GetIdx()])
+        d_center = distances[metal_idx, atm.GetIdx()]
+
+        # Get distances from metal to electronegative neighbors
+        d_connections = np.array(
+            [
+                distances[metal_idx, a.GetIdx()]
+                for b in atm.GetBonds()
+                for a in [b.GetEndAtom(), b.GetBeginAtom()]
+                if a.GetIdx() != atm.GetIdx() and a.GetIdx() in possible_elec_neg_idx
+            ]
         )
-    except AttributeError:
-        # Fallback to hardcoded list for elements not in periodictable
-        return symbol in transition_metal_covalent_radii
+
+        # If connections are significantly closer to metal than the central atom, block it
+        # print(
+        #    atm.GetIdx(),
+        #    d_center,
+        #    [distances[metal_idx, a.GetIdx()] for b in atm.GetBonds() for a in [b.GetEndAtom(), b.GetBeginAtom()]], # if a.GetIdx() != atm.GetIdx()],
+        #    d_connections,
+        #    (d_center - d_connections) / d_center
+        # ) # NoteHere
+        if (
+            len(d_connections) > 0
+            and np.max((d_center - d_connections) / d_center) > dist_frac
+        ):
+            block_bond_idx.append(atm.GetIdx())
+
+    return block_bond_idx
 
 
 def _determine_connectivity_rdkit(
-    rdkit_mol, max_distance_tolerance=0.1, min_distance_tolerance=0.5
+    rdkit_mol, max_distance_tolerance=0.2, min_distance_tolerance=0.4
 ):
     """
     Determine molecular connectivity using RDKit with custom logic for metal atoms.
@@ -489,9 +569,10 @@ def _determine_connectivity_rdkit(
     rdkit_mol : rdkit.Chem.Mol
         The input RDKit molecule, which must have at least one conformer with 3D coordinates.
     max_distance_tolerance : float, optional
-        The maximum additional distance (in angstroms) allowed beyond the sum of covalent radii for bond formation. Default is 0.1.
+        The maximum additional distance (in angstroms) allowed beyond the sum of covalent radii for bond formation.
+        Default is 0.2.
     min_distance_tolerance : float, optional
-        The minimum distance (in angstroms) below which atoms are considered too close to form a bond. Default is 0.5.
+        The minimum distance (in angstroms) below which atoms are considered too close to form a bond. Default is 0.4.
 
     Returns
     -------
@@ -515,35 +596,42 @@ def _determine_connectivity_rdkit(
     else:
         conformer = mol.GetConformer()
 
-    # Calculate distances and add bonds
+    symbols = [a.GetSymbol() for a in mol.GetAtoms()]
+    radii = np.array([_get_covalent_radius(sym) for sym in symbols])
+    positions = np.array(
+        [conformer.GetAtomPosition(i) for i in range(len(radii))], dtype=float
+    )
+    distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
+    metal_idx = [
+        a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
+    ][0]
+
     for i in range(mol.GetNumAtoms()):
-        symbol_i = mol.GetAtomWithIdx(i).GetSymbol()
-        pos_i = conformer.GetAtomPosition(i)
-
         for j in range(i + 1, mol.GetNumAtoms()):
-            symbol_j = mol.GetAtomWithIdx(j).GetSymbol()
-
-            radius_i = _get_covalent_radius(symbol_i)
-            radius_j = _get_covalent_radius(symbol_j)
-            max_bond_threshold = radius_i + radius_j + max_distance_tolerance
-            min_bond_threshold = radius_i + radius_j - min_distance_tolerance
-            if _is_transition_metal(symbol_i) or _is_transition_metal(symbol_j):
-                max_bond_threshold *= 1.3  # Increase threshold for metal complexes
+            one_is_tm = _is_transition_metal(symbols[i]) or _is_transition_metal(
+                symbols[j]
+            )
+            factor = 2 if one_is_tm else 1
+            max_bond_threshold = radii[i] + radii[j] + max_distance_tolerance * factor
+            min_bond_threshold = radii[i] + radii[j] - min_distance_tolerance * factor
 
             if (
-                pos_i.Distance(conformer.GetAtomPosition(j)) > min_bond_threshold
-                and pos_i.Distance(conformer.GetAtomPosition(j)) < max_bond_threshold
+                distances[i, j] > min_bond_threshold
+                and distances[i, j] < max_bond_threshold
                 and mol.GetBondBetweenAtoms(i, j) is None
             ):
                 mol.AddBond(i, j, Chem.BondType.SINGLE)
 
+    for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
+        if mol.GetBondBetweenAtoms(metal_idx, idx) is not None:
+            mol.RemoveBond(metal_idx, idx)
+
     return mol.GetMol()
 
 
-def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.1):
+def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.2):
     """Use both RDKit and OpenBabel for best results."""
 
-    mol_rdkit = _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
     try:
         mol_rdkit = _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
         if mol_rdkit is not None and mol_rdkit.GetNumBonds() > 0:
@@ -551,7 +639,6 @@ def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.1):
     except Exception:
         pass
 
-    # Fall back to Openbabel
     return _determine_connectivity_openbabel(rdkit_mol)
 
 
@@ -606,7 +693,7 @@ def case_carbon_nitrogen_rings(mol):
             if len(ac[("N", 3)]) == 1:
                 positive_charge.append(ac[("N", 3)][0])
 
-    logger.info(f"There are {len(aromatic_bonds)} aromatic bonds")
+    logger.debug(f"There are {len(aromatic_bonds)} aromatic bonds")
     _, _, charged_atoms_before = assess_atoms(mol)
     for i, bond in enumerate(mol.GetBonds()):
         atm1, atm2 = bond.GetBeginAtom(), bond.GetEndAtom()
@@ -628,7 +715,7 @@ def case_carbon_nitrogen_rings(mol):
                 bond_order = 2
             bond.SetBondType(bond_type_dict[bond_order])
 
-    logger.info(f"There are {len(positive_charge)} charged atoms")
+    logger.debug(f"There are {len(positive_charge)} charged atoms")
     for idx in positive_charge:
         mol.GetAtoms()[idx].SetFormalCharge(1)
 
@@ -701,7 +788,7 @@ def set_special_cases(mol):
 
     # Set positive charge: Nitrogen with 4 connections
     positive_charges = get_connections(mol)[("N", 4)]
-    logger.info(f"There are {len(positive_charges)} charged atoms")
+    logger.debug(f"There are {len(positive_charges)} charged atoms")
     for idx in positive_charges:
         mol.GetAtoms()[idx].SetFormalCharge(1)
 
