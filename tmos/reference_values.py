@@ -175,6 +175,671 @@ group_numbers = {
 }
 
 
+geometry_point_group = {
+    2: {
+        "C2v": "Bent",
+        "C*v": "Linear (heteronuclear)",
+        "D*h": "Linear (homonuclear)",
+        "C2": "Bent (low symmetry)",
+    },
+    3: {
+        "C2v": "T-Shaped / Y-shaped",
+        "D3h": "Trigonal Planar",
+        "C3v": "Trigonal Pyramidal",
+    },
+    4: {
+        "Td": "Tetrahedral",
+        "D4h": "Square Planar (ideal)",
+        "D2h": "Distorted Square Planar",
+        "D2d": "Trigonal Disphenoid",
+        "C3v": "Distorted Tetrahedral",
+        "C2v": "Disphenoidal",
+    },
+    5: {
+        "D3h": "Trigonal Bipyramidal",
+        "C4v": "Square Pyramidal",  # data_4HE
+        "D5h": "Pentagonal Planar",
+        "C3v": "Capped Tetrahedral",
+        "C2v": "Distorted Trigonal Bipyramidal",
+    },
+    6: {
+        "Oh": "Octahedral",
+        "D3h": "Trigonal Prismatic",
+        "D6h": "Hexagonal Planar",
+        "C5v": "Pentagonal Pyramidal",
+        "D4h": "Distorted Octahedral (elongated)",
+        "C3v": "Distorted Octahedral (trigonal distortion)",
+        "D3d": "Trigonal Antiprismatic",
+    },
+    7: {
+        "D5h": "Pentagonal Bipyramidal",
+        "C3v": "Capped Trigonal Prismatic / Monocapped Octahedral",
+        "C2v": "Capped Trigonal Prismatic (distorted)",
+        "C6v": "Hexagonal Pyramidal",
+        "D3h": "Bicapped Trigonal Prismatic",
+        "C2v (2)": "Distorted Pentagonal Bipyramidal",
+    },
+    8: {
+        "D4d": "Square Antiprismatic",
+        "D4h": "Square Prismatic",
+        "D2d": "Dodecahedral (Bisdisphenoidal)",
+        "D3d": "Bicapped Trigonal Prismatic",
+        "C2v": "Biaugmented Trigonal Prism",
+        "C4v": "Distorted Square Antiprismatic",
+        "S8": "Snub Dodecahedral",
+    },
+    9: {
+        "D3h": "Tricapped Trigonal Prismatic (ideal)",
+        "C4v": "Capped Square Antiprismatic",
+        "C3v": "Tri Trimer Capped / Distorted Tricapped Prism",
+        "C4v (2)": "Monocapped Square Antiprismatic",
+        "C3v (2)": "Capped Cube",
+    },
+    10: {
+        "D5h": "Ferrocene Eclipsed",
+        "D5d": "Ferrocene Staggered",
+        "D6h": "Axial Bicapped Hexagonal Planar",
+        "D4d": "Bicapped Square Antiprismatic",
+        "D2d": "Bicapped Dodecahedral",
+    },
+    12: {
+        "C5v": "Penta Bicapped Pyramidal",
+        "Ih": "Icosahedral",
+        "Oh": "Cuboctahedral",
+        "D3d": "Anticuboctahedral",
+    },
+}
+
+steinhardt_order_parameters = {
+    2: {
+        "Bent_109": {
+            "frequencies": [2, 4],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.5774156451225281,
+                "w2": -0.00014065926370676607,
+                "q4": 0.7113599181175232,
+                "w4": 0.09650135785341263,
+                "n_coord": 2.0,
+            },
+        },
+        "Bent_120": {
+            "frequencies": [2, 4],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.7100749611854553,
+                "w2": -0.1711329221725464,
+                "q4": 0.5507153272628784,
+                "w4": -0.03618378937244415,
+                "n_coord": 2.0,
+            },
+        },
+        "Linear": {
+            "frequencies": [2, 4],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.9999999403953552,
+                "w2": -0.23904573917388916,
+                "q4": 0.9999999403953552,
+                "w4": 0.13409703969955444,
+                "n_coord": 2.0,
+            },
+        },
+    },
+    3: {
+        "Trigonal Planar": {
+            "frequencies": [2, 4, 6],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.5104385614395142,
+                "w2": 0.19624046981334686,
+                "q4": 0.407200425863266,
+                "w4": 0.13114361464977264,
+                "q6": 0.6826550960540771,
+                "w6": -0.040591683238744736,
+                "n_coord": 3.0,
+            },
+        },
+        "Trigonal Pyramidal": {
+            "frequencies": [2, 4, 6],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.3331843316555023,
+                "w2": 0.23904570937156677,
+                "q4": 0.5845918655395508,
+                "w4": -0.009684908203780651,
+                "q6": 0.6797769665718079,
+                "w6": -0.034754443913698196,
+                "n_coord": 3.0,
+            },
+        },
+        "T-Shaped": {
+            "frequencies": [2, 4, 6],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.5773501992225647,
+                "w2": -3.9123875694713206e-08,
+                "q4": 0.849836528301239,
+                "w4": 0.12744702398777008,
+                "q6": 0.6454972624778748,
+                "w6": -0.04325014352798462,
+                "n_coord": 3.0,
+            },
+        },
+        "Y-Shaped (Distorted Trigonal Planar)": {
+            "frequencies": [2, 4, 6],
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.6334565281867981,
+                "w2": -0.09583141654729843,
+                "q4": 0.5006424784660339,
+                "w4": 0.010797698982059956,
+                "q6": 0.40020471811294556,
+                "w6": -0.013206466101109982,
+                "n_coord": 3.0,
+            },
+        },
+    },
+    4: {
+        "Square Planar": {
+            "frequencies": [2, 4, 6, 8],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.5,
+                "w2": 0.23904575407505035,
+                "q4": 0.8291561603546143,
+                "w4": 0.12497096508741379,
+                "q6": 0.5863019227981567,
+                "w6": -0.007214673329144716,
+                "q8": 0.797946572303772,
+                "w8": 0.06380072236061096,
+                "n_coord": 4.0,
+            },
+        },
+        "Tetrahedral": {
+            "frequencies": [2, 4, 6, 8],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.00011185669427504763,
+                "w2": -0.23740078508853912,
+                "q4": 0.5091750621795654,
+                "w4": -0.15931719541549683,
+                "q6": 0.6285392642021179,
+                "w6": 0.013160541653633118,
+                "q8": 0.21276205778121948,
+                "w8": 0.058453869074583054,
+                "n_coord": 4.0,
+            },
+        },
+        "D2D": {
+            "frequencies": [2, 4, 6, 8],
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.45295846462249756,
+                "w2": -0.23758386075496674,
+                "q4": 0.27164676785469055,
+                "w4": -0.11171372979879379,
+                "q6": 0.5501919984817505,
+                "w6": 0.009498655796051025,
+                "q8": 0.5748531818389893,
+                "w8": 0.006260153371840715,
+                "n_coord": 4.0,
+            },
+        },
+        "Disphenoidal": {
+            "frequencies": [2, 4, 6, 8],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.25,
+                "w2": -0.23904573917388916,
+                "q4": 0.7806247472763062,
+                "w4": 0.15342892706394196,
+                "q6": 0.42389559745788574,
+                "w6": -0.03412322327494621,
+                "q8": 0.7388493418693542,
+                "w8": 0.06084061414003372,
+                "n_coord": 4.0,
+            },
+        },
+        "X-Shaped (Distorted Square Planar)": {
+            "frequencies": [2, 4, 6, 8],
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.6221431493759155,
+                "w2": -0.08000330626964569,
+                "q4": 0.6464530825614929,
+                "w4": 0.06296603381633759,
+                "q6": 0.8116033673286438,
+                "w6": -0.08495589345693588,
+                "q8": 0.6188557147979736,
+                "w8": 0.022381765767931938,
+                "n_coord": 4.0,
+            },
+        },
+    },
+    5: {
+        "Square Pyramidal": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.20000003278255463,
+                "w2": 0.23904572427272797,
+                "q4": 0.7745965719223022,
+                "w4": 0.15388314425945282,
+                "q6": 0.4000000059604645,
+                "w6": -0.006688651163130999,
+                "q8": 0.7314369082450867,
+                "w8": 0.05984552949666977,
+                "q10": 0.44999995827674866,
+                "w10": 0.049147557467222214,
+                "n_coord": 5.0,
+            },
+        },
+        "Trigonal Bipyramidal": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.11746109277009964,
+                "w2": 0.020522676408290863,
+                "q4": 0.632212221622467,
+                "w4": 0.13417577743530273,
+                "q6": 0.421623557806015,
+                "w6": 0.04959900304675102,
+                "q8": 0.6455274820327759,
+                "w8": 0.08014599978923798,
+                "q10": 0.3726538419723511,
+                "w10": -0.03523764759302139,
+                "n_coord": 5.0,
+            },
+        },
+        "Pentagonal Planar": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.5,
+                "w2": 0.23904573917388916,
+                "q4": 0.3750000298023224,
+                "w4": 0.13409700989723206,
+                "q6": 0.3125000596046448,
+                "w6": 0.09305937588214874,
+                "q8": 0.2734377384185791,
+                "w8": 0.07122969627380371,
+                "q10": 0.6426163911819458,
+                "w10": -0.010567935183644295,
+                "n_coord": 5.0,
+            },
+        },
+    },
+    6: {
+        "Hexagonal_Planar": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.49559152126312256,
+                "w2": 0.23830391466617584,
+                "q4": 0.3821031451225281,
+                "w4": 0.07606956362724304,
+                "q6": 0.7408580780029297,
+                "w6": -0.05832964926958084,
+                "q8": 0.5259535312652588,
+                "w8": 0.04336049407720566,
+                "q10": 0.4661417603492737,
+                "w10": 0.0009488285286352038,
+                "n_coord": 6.0,
+            },
+        },
+        "Octahedral": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 6.36237516005167e-08,
+                "w2": -0.03803377225995064,
+                "q4": 0.7637625932693481,
+                "w4": 0.15931734442710876,
+                "q6": 0.3535533547401428,
+                "w6": 0.013160597532987595,
+                "q8": 0.7180703282356262,
+                "w8": 0.05845480039715767,
+                "q10": 0.41142532229423523,
+                "w10": 0.09013022482395172,
+                "n_coord": 6.0,
+            },
+        },
+        "Trigonal Prismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.1430857628583908,
+                "w2": -0.23904535174369812,
+                "q4": 0.42857110500335693,
+                "w4": -0.1340968757867813,
+                "q6": 0.1268264651298523,
+                "w6": 0.023293999955058098,
+                "q8": 0.5563730001449585,
+                "w8": 0.0882507711648941,
+                "q10": 0.4548996686935425,
+                "w10": 0.03688303753733635,
+                "n_coord": 6.0,
+            },
+        },
+        "Pentagonal Pyramidal": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.2500000298023224,
+                "w2": 0.23904556035995483,
+                "q4": 0.4791666269302368,
+                "w4": 0.13409702479839325,
+                "q6": 0.09375017136335373,
+                "w6": 0.09305854886770248,
+                "q8": 0.39453139901161194,
+                "w8": 0.07122970372438431,
+                "q10": 0.49617868661880493,
+                "w10": -0.0032245886977761984,
+                "n_coord": 6.0,
+            },
+        },
+    },
+    7: {
+        "Pentagonal Bipyramidal": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.07142864167690277,
+                "w2": 0.239044189453125,
+                "q4": 0.5535714030265808,
+                "w4": 0.13409703969955444,
+                "q6": 0.06250011175870895,
+                "w6": -0.0930580198764801,
+                "q8": 0.481026828289032,
+                "w8": 0.0712297186255455,
+                "q10": 0.43803879618644714,
+                "w10": 0.009024242870509624,
+                "n_coord": 7.0,
+            },
+        },
+        "Capped Trigonal Prismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.13383248448371887,
+                "w2": 0.2208513468503952,
+                "q4": 0.3404490649700165,
+                "w4": -0.11354713141918182,
+                "q6": 0.2266782522201538,
+                "w6": -0.05554445460438728,
+                "q8": 0.46539512276649475,
+                "w8": 0.08318125456571579,
+                "q10": 0.4689704179763794,
+                "w10": 0.029251497238874435,
+                "n_coord": 7.0,
+            },
+        },
+        "Capped Octahedral": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.1428571194410324,
+                "w2": -0.23904573917388916,
+                "q4": 0.5947616696357727,
+                "w4": 0.13048802316188812,
+                "q6": 0.40824827551841736,
+                "w6": -0.009769244119524956,
+                "q8": 0.6607946753501892,
+                "w8": 0.05693388357758522,
+                "q10": 0.2815363109111786,
+                "w10": 0.06592792272567749,
+                "n_coord": 7.0,
+            },
+        },
+        "Hexagonal Pyramidal": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.28663864731788635,
+                "w2": 0.2371826171875,
+                "q4": 0.45855510234832764,
+                "w4": 0.10374858975410461,
+                "q6": 0.6024186015129089,
+                "w6": -0.04341914504766464,
+                "q8": 0.5174150466918945,
+                "w8": 0.06000193580985069,
+                "q10": 0.38722971081733704,
+                "w10": -0.027636300772428513,
+                "n_coord": 7.0,
+            },
+        },
+    },
+    8: {
+        "Axial Bicapped Trigonal Prismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.1519201099872589,
+                "w2": -0.20866623520851135,
+                "q4": 0.17394958436489105,
+                "w4": -0.09383772313594818,
+                "q6": 0.5230703949928284,
+                "w6": -0.06292582303285599,
+                "q8": 0.36597657203674316,
+                "w8": 0.06118076667189598,
+                "q10": 0.28935301303863525,
+                "w10": -0.06768272817134857,
+                "n_coord": 8.0,
+            },
+        },
+        "Square Prismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 3.4799342074620654e-08,
+                "w2": 0.16523730754852295,
+                "q4": 0.5091750621795654,
+                "w4": -0.15931735932826996,
+                "q6": 0.6285393238067627,
+                "w6": 0.013160602189600468,
+                "q8": 0.21276161074638367,
+                "w8": 0.05845479294657707,
+                "q10": 0.6501537561416626,
+                "w10": -0.09013020992279053,
+                "n_coord": 8.0,
+            },
+        },
+        "Bicapped Trigonal Prismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.1272450089454651,
+                "w2": -0.09710708260536194,
+                "q4": 0.24894611537456512,
+                "w4": -0.10508070886135101,
+                "q6": 0.27114859223365784,
+                "w6": -0.052299708127975464,
+                "q8": 0.4114300608634949,
+                "w8": 0.07433667778968811,
+                "q10": 0.45485085248947144,
+                "w10": 0.04329732805490494,
+                "n_coord": 8.0,
+            },
+        },
+        "Square Antiprismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.0009955670684576035,
+                "w2": -0.23904575407505035,
+                "q4": 0.389438658952713,
+                "w4": -0.13409733772277832,
+                "q6": 0.2210564762353897,
+                "w6": -0.09305877238512039,
+                "q8": 0.19758707284927368,
+                "w8": 0.05813410133123398,
+                "q10": 0.5258861184120178,
+                "w10": -0.08212145417928696,
+                "n_coord": 8.0,
+            },
+        },
+        "Dodecahedral": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.10236421972513199,
+                "w2": -0.23904567956924438,
+                "q4": 0.33563941717147827,
+                "w4": -0.00639825314283371,
+                "q6": 0.1987992376089096,
+                "w6": 0.009886451996862888,
+                "q8": 0.3448648154735565,
+                "w8": -0.020618854090571404,
+                "q10": 0.5158146619796753,
+                "w10": -0.005757955368608236,
+                "n_coord": 8.0,
+            },
+        },
+        "Hexagonal Bipyramidal": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.13749155402183533,
+                "w2": 0.2276947796344757,
+                "q4": 0.5206760764122009,
+                "w4": 0.11593051254749298,
+                "q6": 0.527459442615509,
+                "w6": -0.014850694686174393,
+                "q8": 0.5344070196151733,
+                "w8": 0.06690262258052826,
+                "q10": 0.37233269214630127,
+                "w10": -0.045876674354076385,
+                "n_coord": 8.0,
+            },
+        },
+    },
+    9: {
+        "Tri Trimer Capped": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.02948261797428131,
+                "w2": 0.06943836808204651,
+                "q4": 0.25417667627334595,
+                "w4": 0.14312632381916046,
+                "q6": 0.3546724021434784,
+                "w6": -0.0033967597410082817,
+                "q8": 0.31036192178726196,
+                "w8": 0.05943664163351059,
+                "q10": 0.3119872212409973,
+                "w10": 0.019972074776887894,
+                "n_coord": 9.0,
+            },
+        },
+        "Tricapped Trigonal Prismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.07904651015996933,
+                "w2": 0.054371099919080734,
+                "q4": 0.16921505331993103,
+                "w4": -0.13700875639915466,
+                "q6": 0.29893168807029724,
+                "w6": -0.03608447313308716,
+                "q8": 0.3604864180088043,
+                "w8": 0.0801314115524292,
+                "q10": 0.44703975319862366,
+                "w10": 0.046817950904369354,
+                "n_coord": 9.0,
+            },
+        },
+        "Capped Square Antiprismatic": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.11199605464935303,
+                "w2": -0.23904569447040558,
+                "q4": 0.2350568026304245,
+                "w4": -0.13409775495529175,
+                "q6": 0.3076055943965912,
+                "w6": -0.09305919706821442,
+                "q8": 0.271452933549881,
+                "w8": 0.06637545675039291,
+                "q10": 0.42200222611427307,
+                "w10": -0.06331609934568405,
+                "n_coord": 9.0,
+            },
+        },
+    },
+    10: {
+        "Axial Bicapped Hexagonal Planar": {
+            "frequencies": [2, 4, 6, 8, 10],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.021369555965065956,
+                "w2": -0.1722596287727356,
+                "q4": 0.2525337040424347,
+                "w4": 0.1299089640378952,
+                "q6": 0.4226398169994354,
+                "w6": -0.04415065795183182,
+                "q8": 0.24934378266334534,
+                "w8": -0.022983208298683167,
+                "q10": 0.3649451434612274,
+                "w10": -0.006130501162260771,
+                "n_coord": 10.0,
+            },
+        },
+    },
+    12: {
+        "Penta Bicapped Pyramidal": {
+            "frequencies": [2, 4, 6, 8, 10, 12],
+            "include_w": True,
+            "include_n_coord": True,
+            "values": {
+                "q2": 0.0765121579170227,
+                "w2": 0.23445947468280792,
+                "q4": 0.11949670314788818,
+                "w4": 0.11676796525716782,
+                "q6": 0.5300361514091492,
+                "w6": -0.16511033475399017,
+                "q8": 0.17152823507785797,
+                "w8": -0.03827560693025589,
+                "q10": 0.3132377564907074,
+                "w10": -0.05592367425560951,
+                "q12": 0.27362361550331116,
+                "w12": 0.05475636199116707,
+                "n_coord": 12.0,
+            },
+        },
+    },
+}
+
 ideal_angles = {
     2: {  # 1 angles
         "Bent_109": np.array([109.0]),
@@ -183,28 +848,20 @@ ideal_angles = {
     },
     3: {  # 3 angles
         "Trigonal Planar": np.array([120, 120, 120]),
-        "Trigonal Planar 2": np.array([109, 126, 126]),  # From Architector
-        "Trigonal Pyramidal": np.array([107, 107, 107]),
-        "Trigonal Pyramidal 2": np.array([109, 109, 109]),  # From Architector
+        "Trigonal Pyramidal": np.array([109, 109, 109]),
         "T-Shaped": np.array([90, 90, 180]),
+        "Y-Shaped (Distorted Trigonal Planar)": np.array([80, 140, 140]),
     },
     4: {  # 6 angles
         "Square Planar": np.array([90, 90, 90, 90, 180, 180]),
-        "Tetrahedral 2": np.array([109.5, 109.5, 109.5, 109.5, 109.5, 109.5]),
-        "Tetrahedral": np.array(
-            [109.0, 109.0, 109.0, 109.0, 109.0, 109.0]
-        ),  # From Architector
-        "Disphenoidal": np.array([90, 90, 90, 90, 120, 180]),  # Seesaw
-        "Disphenoidal 2": np.array(
-            [90, 90, 90, 90, 90, 180]
-        ),  # Seesaw # From Architector
+        "Tetrahedral": np.array([109.5, 109.5, 109.5, 109.5, 109.5, 109.5]),
+        "D2D": np.array([73.7, 73.7, 124.7, 128.6, 131.8, 134.1]),
+        "Disphenoidal": np.array([90, 90, 90, 90, 90, 180]),
+        "X-Shaped (Distorted Square Planar)": np.array([64, 64, 116, 116, 180, 180]),
     },
     5: {  # 10 angles
         "Square Pyramidal": np.array([90, 90, 90, 90, 90, 90, 90, 90, 180, 180]),
-        "Trigonal Bipyramidal": np.array([90, 90, 90, 90, 90, 90, 120, 120, 120, 180]),
-        "Trigonal Bipyramidal 2": np.array(
-            [90, 90, 90, 90, 90, 90, 109, 126, 126, 180]
-        ),  # From Architector
+        "Trigonal Bipyramidal": np.array([90, 90, 90, 90, 90, 90, 109, 126, 126, 180]),
         "Pentagonal Planar": np.array([72, 72, 72, 72, 72, 144, 144, 144, 144, 144]),
     },
     6: {  # 15 angles
@@ -215,17 +872,14 @@ ideal_angles = {
             [90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 180, 180, 180]
         ),
         "Trigonal Prismatic": np.array(
-            [60, 60, 60, 60, 60, 60, 90, 90, 90, 120, 120, 120, 150, 150, 150]
-        ),
-        "Trigonal Prismatic 2": np.array(
             [82, 82, 82, 82, 82, 82, 82, 82, 82, 136, 136, 136, 136, 136, 136]
-        ),  # From Architector
-        # "Pentagonal Pyramidal": np.array([
-        #     72, 72, 72, 72, 72, 90, 90, 90, 90, 90, 144, 144, 144, 144, 144
-        # ]),
+        ),
+        "Pentagonal Pyramidal": np.array(
+            [72, 72, 72, 72, 72, 90, 90, 90, 90, 90, 144, 144, 144, 144, 144]
+        ),
     },
     7: {  # 21 angles
-        "Pentagonal Bipyamidal": np.array(
+        "Pentagonal Bipyramidal": np.array(
             [
                 72,
                 72,
@@ -251,31 +905,6 @@ ideal_angles = {
             ]
         ),
         "Capped Trigonal Prismatic": np.array(
-            [
-                60,
-                60,
-                60,
-                60,
-                60,
-                60,
-                90,
-                90,
-                90,
-                90,
-                90,
-                90,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-                120,
-            ]
-        ),
-        "Capped Trigonal Prismatic 2": np.array(  # From Architector
             [
                 68,
                 68,
@@ -325,7 +954,7 @@ ideal_angles = {
                 180,
             ]
         ),
-        "Hexagonal Pyramidal'": np.array(  # From Architector
+        "Hexagonal Pyramidal": np.array(  # From Architector
             [
                 59,
                 59,
@@ -788,6 +1417,108 @@ ideal_angles = {
                 166,
                 180,
             ]
+        ),
+    },
+}
+
+
+coordinate_eigenvalues = {
+    2: {  # 1 angles
+        "Bent_109": np.array([0.6667421557997912, 0.33325784420020876, 0.0]),
+        "Bent_120": np.array([0.7910936556725274, 0.20890634432747257, 0.0]),
+        "Linear": np.array([1.0, 0.0, 0.0]),
+    },
+    3: {  # 3 angles
+        "Trigonal Planar": np.array([0.5592947103274559, 0.44070528967254413, 0.0]),
+        "Trigonal Pyramidal": np.array(
+            [0.4443981896462589, 0.44439138610233786, 0.11121042425140316]
+        ),
+        "T-Shaped": np.array([0.6666666666666666, 0.3333333333333333, 0.0]),
+        "Y-Shaped (Distorted Trigonal Planar)": np.array([0.72454939, 0.27545061, 0.0]),
+    },
+    4: {  # 6 angles
+        "Square Planar": np.array([0.5, 0.5, 0.0]),
+        "Tetrahedral": np.array(
+            [0.3334078364322992, 0.3332986422346942, 0.3332935213330063]
+        ),
+        "D2D": np.array([0.63887474, 0.19504344, 0.16608182]),
+        "Disphenoidal": np.array([0.5, 0.25, 0.25]),
+        "X-Shaped (Distorted Square Planar)": np.array([0.713745895, 0.286254104, 0.0]),
+    },
+    5: {  # 10 angles
+        "Square Pyramidal": np.array([0.4, 0.4, 0.2]),
+        "Trigonal Bipyramidal": np.array(
+            [0.4, 0.33557682619647355, 0.2644231738035265]
+        ),
+        "Pentagonal Planar": np.array([0.5000695828046874, 0.4999304171953128, 0.0]),
+    },
+    6: {  # 15 angles
+        "Hexagonal_Planar": np.array(
+            [0.5059880926100845, 0.4909589579214232, 0.0030529494684921497]
+        ),  # From Architector
+        "Octahedral": np.array(
+            [0.3333333333333333, 0.3333333333333333, 0.3333333333333333]
+        ),
+        "Trigonal Prismatic": np.array(
+            [0.4287236319325147, 0.28568744230125065, 0.28558892576623446]
+        ),
+        "Pentagonal Pyramidal": np.array(
+            [0.4167246523372395, 0.41660868099609405, 0.16666666666666666]
+        ),
+    },
+    7: {  # 21 angles
+        "Pentagonal Bipyramidal": np.array(
+            [0.3571925591462053, 0.3570931551395091, 0.2857142857142857]
+        ),
+        "Capped Trigonal Prismatic": np.array(
+            [0.3876476506567723, 0.3674773987992985, 0.24487495054392933]
+        ),
+        "Capped Octahedral": np.array(
+            [0.42857142857142866, 0.28571428571428575, 0.2857142857142857]
+        ),
+        "Hexagonal Pyramidal": np.array(
+            [0.4356864576739324, 0.4219069541099603, 0.1424065882161074]
+        ),
+    },
+    8: {  # 28 angles
+        "Axial Bicapped Trigonal Prismatic": np.array(
+            [0.4331556043643433, 0.2982513930536019, 0.2685930025820551]
+        ),
+        "Square Prismatic": np.array(
+            [0.3333333333333333, 0.3333333333333333, 0.3333333333333333]
+        ),
+        "Bicapped Trigonal Prismatic": np.array(
+            [0.4119805499904716, 0.32154272394938616, 0.2664767260601424]
+        ),
+        "Square Antiprismatic": np.array(
+            [0.3339970772954944, 0.333001461352253, 0.33300146135225284]
+        ),
+        "Dodecahedral": np.array(
+            [0.40157597124808503, 0.2992120143759575, 0.2992120143759575]
+        ),
+        "Hexagonal Bipyramidal": np.array(
+            [0.38709280981471705, 0.3707478860410238, 0.2421593041442594]
+        ),
+    },
+    9: {  # 36 angles
+        "Tri Trimer Capped": np.array(
+            [0.34930922744139364, 0.3352610671744947, 0.3154297053841118]
+        ),
+        "Tricapped Trigonal Prismatic": np.array(
+            [0.37682418728664163, 0.337360058091682, 0.2858157546216766]
+        ),
+        "Capped Square Antiprismatic": np.array(
+            [0.40799740204043955, 0.2960012989797803, 0.2960012989797802]
+        ),
+    },
+    10: {  # 45 angles
+        "Axial Bicapped Hexagonal Planar": np.array(
+            [0.3471177539711339, 0.3295576840887806, 0.32332456194008563]
+        ),
+    },
+    12: {  # 66 angles
+        "Penta Bicapped Pyramidal": np.array(
+            [0.3616699075606238, 0.3558958082460608, 0.28243428419331534]
         ),
     },
 }

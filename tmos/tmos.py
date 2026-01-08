@@ -193,6 +193,7 @@ def check_ligand_exception(mol, metal_coordinating_indices):
         for atm in mol.GetAtoms()
         if atm.GetIdx() in metal_coordinating_indices
     ]
+
     dummy_atoms = [
         atm for atm in mol.GetAtoms() if atm.GetIntProp("__original_index") == -1
     ]
@@ -223,19 +224,21 @@ def check_ligand_exception(mol, metal_coordinating_indices):
             raise ValueError("Ligand molecule has multiple conformers")
         if tmp_mol.GetAtoms()[0].GetSymbol() != "O":
             raise ValueError("This should be an oxygen!")
-        tmp_mol.GetAtoms()[0].SetIntProp(
-            "__original_index", metal_connected_orig_indices[0]
-        )
+
+        if metal_connected_orig_indices:
+            tmp_mol.GetAtoms()[0].SetIntProp(
+                "__original_index", metal_connected_orig_indices[0]
+            )
         tmp_mol.AddConformer(
             Chem.rdchem.Conformer(tmp_mol.GetNumAtoms()), assignId=True
         )
-
-        brd.copy_atom_coords(
-            tmp_mol, 0, mol, metal_coordinating_indices[0], confId2=conf_ids[0]
-        )
+        if metal_connected_orig_indices:
+            brd.copy_atom_coords(
+                tmp_mol, 0, mol, metal_coordinating_indices[0], confId2=conf_ids[0]
+            )
         mol = Chem.AddHs(tmp_mol, explicitOnly=True, addCoords=True)
         for a in mol.GetAtoms():
-            if a.GetIdx() == 0:
+            if a.HasProp("__original_index"):
                 continue
             a.SetIntProp(
                 "__original_index", -2
@@ -615,7 +618,7 @@ def assert_same_ring(mol, ind1, ind2, max_ring_size=6):
         return ind2 in indices
 
 
-def detect_additional_bonds(mol, index=None):
+def detect_additional_bonds(mol, index=None, distance_tolerance=0.2):
     """Use the coordinates to check if any other bonds could be defined.
 
     Parameters
@@ -640,7 +643,10 @@ def detect_additional_bonds(mol, index=None):
     conformer = mol.GetConformer()
     positions = np.array(conformer.GetPositions())
     new_mol = brd.xyz_to_rdkit(
-        symbols, positions, ignore_scale=True
+        symbols,
+        positions,
+        ignore_scale=True,
+        distance_tolerance=distance_tolerance,
     )  # atom ids will be equivalent
     for bond in new_mol.GetBonds():
         idx1, idx2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
@@ -1072,8 +1078,8 @@ def sanitize_complex(
     frag_mols, coordinating_atoms = cleave_mol_from_index(
         mol, tmc_idx, add_atom=add_atom
     )
-    geometry_angles, n_bonds = get_geometry_from_mol(mol, tmc_idx, mode="angles")
-    geometry_rylm, _ = get_geometry_from_mol(mol, tmc_idx, mode="rylm")
+    geometry_angles, n_bonds, _ = get_geometry_from_mol(mol, tmc_idx, mode="angles")
+    geometry_rylm, _, _ = get_geometry_from_mol(mol, tmc_idx, mode="rylm")
 
     total_xtype = 0
     total_ltype = 0
