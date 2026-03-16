@@ -6,13 +6,18 @@ import networkx as nx
 from loguru import logger
 
 
-def mol_to_graph(mol):
+def mol_to_graph(mol, remove_hydrogens=False):
     """Convert an RDKit molecule to a NetworkX graph with atom features.
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule object.
+    remove_hydrogens : bool, optional
+        If ``True``, hydrogen atoms are excluded from the graph.  Nodes retain
+        their original RDKit atom indices so paths returned by NetworkX map
+        directly back to atom indices in *mol* without re-indexing.
+        Defaults to ``False``.
 
     Returns
     -------
@@ -21,25 +26,41 @@ def mol_to_graph(mol):
         Each node contains the following attributes:
             - symbol (str): Atomic symbol (e.g., 'C', 'O', 'N').
             - degree (int): Number of bonds (degree) for the atom.
+            - atom_idx (int): Original RDKit atom index (equals the node key).
     """
     G = nx.Graph()
 
     atom_degree = defaultdict(lambda: 0)
     for b in mol.GetBonds():
-        atom_degree[b.GetBeginAtomIdx()] += 1
-        atom_degree[b.GetEndAtomIdx()] += 1
+        begin_idx = b.GetBeginAtomIdx()
+        end_idx = b.GetEndAtomIdx()
+        if remove_hydrogens and (
+            mol.GetAtomWithIdx(begin_idx).GetAtomicNum() == 1
+            or mol.GetAtomWithIdx(end_idx).GetAtomicNum() == 1
+        ):
+            continue
+        atom_degree[begin_idx] += 1
+        atom_degree[end_idx] += 1
 
     for atom in mol.GetAtoms():
+        if remove_hydrogens and atom.GetAtomicNum() == 1:
+            continue
         idx = atom.GetIdx()
         G.add_node(
             idx,
             symbol=atom.GetSymbol(),
             degree=atom_degree[idx],
+            atom_idx=idx,
         )
 
     for bond in mol.GetBonds():
         begin_idx = bond.GetBeginAtomIdx()
         end_idx = bond.GetEndAtomIdx()
+        if remove_hydrogens and (
+            mol.GetAtomWithIdx(begin_idx).GetAtomicNum() == 1
+            or mol.GetAtomWithIdx(end_idx).GetAtomicNum() == 1
+        ):
+            continue
         G.add_edge(begin_idx, end_idx)
 
     return G
