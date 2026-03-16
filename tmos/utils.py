@@ -227,3 +227,152 @@ def view3D(molecule, label_idx=False, label_symbol=False, kekulize=True, indices
                 )
 
     return view
+
+
+def diagnose_atom_valence(atom, show=True):
+    """
+    Inspect an RDKit Atom for valence/charge/bonding inconsistencies useful for debugging.
+    Args:
+        atom: rdkit.Chem.rdchem.Atom
+        show: if True, print a short human-readable summary (function still returns the dict)
+    Returns:
+        dict with detailed diagnostics
+    """
+    # basic properties
+    idx = atom.GetIdx()
+    Z = atom.GetAtomicNum()
+    symbol = atom.GetSymbol()
+    formal_charge = atom.GetFormalCharge()
+    degree = atom.GetDegree()  # number of directly bonded neighbors
+    num_explicit_h = atom.GetNumExplicitHs()
+    num_implicit_h = atom.GetNumImplicitHs()
+    total_h = atom.GetTotalNumHs()
+    num_radical_e = atom.GetNumRadicalElectrons()
+    hybrid = (
+        atom.GetHybridization().name
+        if hasattr(atom.GetHybridization(), "name")
+        else str(atom.GetHybridization())
+    )
+    is_aromatic = atom.GetIsAromatic()
+    is_in_ring = atom.IsInRing()
+    mass = atom.GetMass()
+    rdkit_total_valence = atom.GetTotalValence()
+
+    # neighbor / bond info
+    bonds = list(atom.GetBonds())
+    neighbor_info = []
+    sum_bond_orders = 0.0
+    for b in bonds:
+        nb_idx = b.GetOtherAtomIdx(idx)
+        nb = b.GetOtherAtom(atom)
+        btype = str(b.GetBondType())
+        try:
+            bord = float(b.GetBondTypeAsDouble())
+        except Exception:
+            # fallback for aromatic etc.
+            bord = 1.5 if b.GetIsAromatic() else 1.0
+        sum_bond_orders += bord
+        neighbor_info.append(
+            {
+                "nbr_idx": nb_idx,
+                "nbr_symbol": nb.GetSymbol(),
+                "bond_type": btype,
+                "bond_order": bord,
+                "is_aromatic": b.GetIsAromatic(),
+                "is_in_ring": b.IsInRing(),
+            }
+        )
+
+    # computed valence from explicit bonding + Hs + radical electrons
+    computed_valence = sum_bond_orders + total_h + num_radical_e
+
+    # naive typical-valence lookup for common elements (fallback=None)
+    typical_valence_map = {
+        "H": 1,
+        "C": 4,
+        "N": 3,
+        "O": 2,
+        "F": 1,
+        "P": 3,
+        "S": 2,
+        "Cl": 1,
+        "Br": 1,
+        "I": 1,
+        "B": 3,
+    }
+    typical_valence = typical_valence_map.get(symbol)
+
+    # diagnostics / heuristics
+    messages = []
+    if abs(computed_valence - rdkit_total_valence) > 1e-6:
+        messages.append(
+            f"RDKit reported total_valence={rdkit_total_valence:.2f} but sum(bond_orders)+Hs+radicals={computed_valence:.2f}."
+        )
+    if formal_charge != 0 and typical_valence is not None:
+        # allow for common charged states by shifting typical valence expectation by charge
+        if abs((typical_valence - formal_charge) - computed_valence) > 0.5:
+            messages.append(
+                f"Formal charge {formal_charge:+d} shifts expected valence; computed ({computed_valence:.2f}) differs "
+                f"from typical({typical_valence})±charge."
+            )
+    if typical_valence is not None and computed_valence > typical_valence + 0.5:
+        messages.append(
+            f"Possible hypervalence: computed valence {computed_valence:.2f} > typical valence {typical_valence}."
+        )
+    if total_h == 0 and symbol == "H":
+        messages.append(
+            "Hydrogen with zero H count (impossible) — likely indexing/explicit-H mismatch."
+        )
+    if (
+        is_aromatic
+        and any(bd["bond_type"].upper() == "DOUBLE" for bd in neighbor_info)
+        and symbol in ("C", "N", "O")
+    ):
+        messages.append(
+            "Aromatic atom but contains explicit double bonds in neighbors — check kekulization/state."
+        )
+    if not messages:
+        messages.append("No obvious valence problems detected by heuristics.")
+
+    result = {
+        "idx": idx,
+        "atomic_num": Z,
+        "symbol": symbol,
+        "formal_charge": formal_charge,
+        "degree": degree,
+        "num_explicit_h": num_explicit_h,
+        "num_implicit_h": num_implicit_h,
+        "total_h": total_h,
+        "num_radical_electrons": num_radical_e,
+        "hybridization": hybrid,
+        "is_aromatic": is_aromatic,
+        "is_in_ring": is_in_ring,
+        "mass": mass,
+        "rdkit_total_valence": rdkit_total_valence,
+        "sum_bond_orders": sum_bond_orders,
+        "computed_valence": computed_valence,
+        "typical_valence": typical_valence,
+        "neighbors": neighbor_info,
+        "messages": messages,
+    }
+
+    if show:
+        summary = (
+            f"{symbol}{idx} Z={Z} charge={formal_charge:+d} deg={degree} "
+            f"bonds={len(bonds)} bond_order_sum={sum_bond_orders:.2f} Hs={total_h} "
+            f"rdkit_valence={rdkit_total_valence:.2f} computed_valence={computed_valence:.2f}"
+        )
+        print(summary)
+        for m in messages:
+            print(" -", m)
+        # compact neighbor table
+        print(
+            " neighbors:",
+            ", ".join(
+                f"{n['nbr_symbol']}[{n['nbr_idx']}]:{n['bond_type']}({n['bond_order']})"
+                for n in neighbor_info
+            )
+            or " none",
+        )
+
+    return result
