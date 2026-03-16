@@ -4,13 +4,11 @@ channels:
   - conda-forge
 
 dependencies:
-    # Base depends
   - python=3.11
   - pip
   - rdkit>=2025.3.3
   - openbabel
-#  - mdanalysis>=2.10.0 # Not yet released
-  - mdanalysis
+  - mdanalysis>=2.10.0
   - networkx
   - qcelemental
   - periodictable
@@ -24,6 +22,3 @@ dependencies:
   - sphinx-design
   - sphinx-copybutton
   - nbsphinx
-
-  - pip:
-      - git+https://github.com/MDAnalysis/mdanalysis.git@develop#subdirectory=package # delete after 2.10 is released
