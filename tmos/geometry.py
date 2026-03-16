@@ -492,7 +492,7 @@ def get_geometry_from_rylm(rdmol, central_idx, metric="cosine"):
 
 
 def get_geometry_from_angles(
-    rdmol, central_idx=0, metric="rmsd", tol=0.75, kwargs_angles={}, kwargs_eig={}
+    rdmol, central_idx=0, tol=0.5, kwargs_angles={}, kwargs_eig={}
 ):
     """
     Determine the bonded geometry of a central atom based on atomic positions from an RDKit molecule.
@@ -545,7 +545,7 @@ def get_geometry_from_angles(
     return geometry
 
 
-def isolate_geometry_atoms(rdmol, central_idx):
+def isolate_geometry_atoms(rdmol, central_idx, normalize=True):
     """Extract central atom and its neighbors as a new molecule with normalized geometry.
 
     The central atom is placed at the origin [0, 0, 0] and neighbor positions are
@@ -559,6 +559,9 @@ def isolate_geometry_atoms(rdmol, central_idx):
         RDKit molecule object with a conformer.
     central_idx : int
         Index of the central atom in the molecule.
+    normalize : bool, optional
+        If ``True`` the bond lengths are scaled to unit vectors. This will allow
+        Default is True.
 
     Returns
     -------
@@ -569,8 +572,8 @@ def isolate_geometry_atoms(rdmol, central_idx):
     atoms_to_keep = [central_idx] + [
         atom.GetIdx() for atom in rdmol.GetAtomWithIdx(central_idx).GetNeighbors()
     ]
-    editable_mol = Chem.EditableMol(Chem.Mol())
 
+    editable_mol = Chem.EditableMol(Chem.Mol())
     for idx in atoms_to_keep:
         atom = rdmol.GetAtomWithIdx(idx)
         atom.SetIsAromatic(False)
@@ -589,16 +592,16 @@ def isolate_geometry_atoms(rdmol, central_idx):
     old_rdmol = rdmol
     rdmol = editable_mol.GetMol()
     conf = Chem.Conformer(rdmol.GetNumAtoms())
-    for i, idx in enumerate(atoms_to_keep):
+    pos = old_rdmol.GetConformer().GetAtomPosition(central_idx)
+    conf.SetAtomPosition(0, Point3D(0.0, 0.0, 0.0))
+    vec0 = np.array([pos.x, pos.y, pos.z])
+    for i, idx in enumerate(atoms_to_keep[1:]):
         pos = old_rdmol.GetConformer().GetAtomPosition(idx)
-        if i != 0:
-            vec0 = np.array([pos.x, pos.y, pos.z])
-            vec = np.array([pos.x, pos.y, pos.z]) - vec0
+        vec = np.array([pos.x, pos.y, pos.z]) - vec0
+        if normalize:
             vec /= np.linalg.norm(vec)
-            pos = Point3D(*vec)
-        else:
-            pos = Point3D(0.0, 0.0, 0.0)
-        conf.SetAtomPosition(i, pos)
+        pos = Point3D(*vec)
+        conf.SetAtomPosition(i + 1, pos)
 
     rdmol.AddConformer(conf, assignId=True)
     return rdmol
@@ -671,7 +674,7 @@ def get_geometry_from_mol(rdmol, central_idx, mode="angles", kwargs_mode={}):
             )
         geometry = get_geometry_from_rylm(rdmol, 0, **kwargs_mode)
     elif mode == "angles":
-        geometry = get_geometry_from_angles(rdmol, central_idx=0, metric="rmsd")
+        geometry = get_geometry_from_angles(rdmol, **kwargs_mode)
     else:
         raise ValueError(f"Calculation mode, {mode}, is not supported.")
 
