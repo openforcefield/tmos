@@ -292,3 +292,60 @@ def find_molecular_rings(mol_graph, min_ring_size=3, max_ring_size=12):
     unique_cycles.sort(key=lambda x: (len(x), min(x)))
 
     return unique_cycles
+
+
+def find_all_paths(graph, source, target, cutoff=None):
+    """Find all simple paths between two nodes in a graph.
+
+    A simple path visits each node at most once. For dense graphs or large
+    cutoff values the number of paths can grow exponentially; use ``cutoff``
+    to limit search depth when necessary.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        NetworkX graph to search. Nodes are typically atom indices.
+    source : int
+        Index of the starting node.
+    target : int
+        Index of the ending node.
+    cutoff : int, optional
+        Maximum number of edges in any returned path. If ``None`` (default),
+        no depth limit is applied.
+
+    Returns
+    -------
+    paths : list[list[int]]
+        List of paths, each path being an ordered list of node indices from
+        ``source`` to ``target``. Returns an empty list if no path exists or
+        if ``source`` and ``target`` are not present in the graph.
+
+    Raises
+    ------
+    ValueError
+        If ``source`` or ``target`` is not a node in the graph.
+
+    Example
+    -------
+    >>> import networkx as nx
+    >>> G = nx.Graph()
+    >>> G.add_edges_from([(0, 1), (1, 2), (0, 2), (2, 3)])
+    >>> paths = find_all_paths(G, 0, 3)
+    >>> print(paths)  # [[0, 1, 2, 3], [0, 2, 3]]
+    """
+    if source not in graph:
+        raise ValueError(f"Source node {source} is not present in the graph.")
+    if target not in graph:
+        raise ValueError(f"Target node {target} is not present in the graph.")
+
+    if source == target:
+        return [[source]]
+
+    try:
+        paths = list(
+            nx.all_simple_paths(graph, source=source, target=target, cutoff=cutoff)
+        )
+    except Exception:
+        return []
+
+    return paths
