@@ -276,53 +276,11 @@ def is_coordinate_ring(mol, metal_coordinating_indices):
     return False
 
 
-def determine_bonds(mol):
-    """Determine bond orders with OpenBabel, with MDA fallback.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.rdchem.Mol
-        RDKit molecule
-
-    Returns
-    -------
-    mol : rdkit.Chem.rdchem.Mol
-        Resulting molecule, or None if the bonds could not be determined for the molecule.
-    """
-    mol = copy.deepcopy(mol)
-    new_mol = brd.determine_bonds_openbabel(mol)
-    if new_mol is None:
-        logger.debug("Try MDAnalysis bond determination")
-        new_mol = brd.determine_bonds_mda(mol)
-    else:
-        new_mol = brd.update_atom_bond_props(copy.deepcopy(mol), new_mol)
-        try:
-            for _ in range(3):
-                brd.add_obvious_bonds(new_mol)
-        except Exception:
-            logger.debug("Addition of obvious bonds failed.")
-            new_mol = None
-        else:
-            _, _, charged_atoms = brd.assess_atoms(new_mol)
-
-        if new_mol is None:
-            new_mol = brd.determine_bonds_mda(mol)
-        elif len(charged_atoms) > 0:
-            new_mol_2 = brd.determine_bonds_mda(mol)
-            if new_mol_2 is not None:
-                _, _, charged_atoms_2 = brd.assess_atoms(new_mol_2)
-                new_mol = (
-                    new_mol if len(charged_atoms) < len(charged_atoms_2) else new_mol_2
-                )
-
-    return new_mol
-
-
 def sanitize_ligand(
     mol,
     delete_list=[],
     wipe=True,
-    tool="hybrid",
+    method="hybrid",
     charge=0,
     sanitize=True,
 ):
@@ -339,7 +297,7 @@ def sanitize_ligand(
         List of RDKit atom objects to delete.
     wipe : bool, optional, default=True
         Whether to wipe bond information from the molecule
-    tool : str, optional, default="hybrid"
+    method : str, optional, default="hybrid"
         Choose the tool used to determine bond borders.
 
         - mdanalysis: ``_infer_bo_and_charges``
@@ -372,42 +330,15 @@ def sanitize_ligand(
     for atm in delete_list:
         mol_after.RemoveAtom(atm.GetIdx())
     mol_after.UpdatePropertyCache(strict=False)
+    mol_after = brd.determine_bonds(mol_after, method=method, charge=charge)
 
-    if tool.lower() == "mdanalysis":
-        mol_after = brd.determine_bonds_mda(mol_after)
-    elif tool.lower() == "rdkit":
-        mol_after = brd.determine_bonds_rdkit(mol_after, charge=charge)
-    elif tool.lower() == "openbabel":
-        mol_tmp = brd.determine_bonds_openbabel(mol_after)
-        mol_after = (
-            brd.update_atom_bond_props(mol_after, mol_tmp)
-            if mol_tmp is not None
-            else None
-        )
-    elif tool.lower() == "hybrid":
-        mol_after = determine_bonds(mol_after)
-    else:
-        raise ValueError(
-            f"Bond determination tool, {tool}, is not recognized. Must be hybrid (preferred), openbabel, mdanalysis, or rdkit."
-        )
-
-    if mol_after is not None:
-        mol_after.UpdatePropertyCache(strict=False)
+    if mol_after is not None and sanitize:
         try:
-            for _ in range(3):
-                brd.add_obvious_bonds(mol_after)
-                brd.correct_special_cases(mol_after)
+            sanitize_molecule(
+                mol_after, sanitize_kekulize=True
+            )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
         except Exception:
-            logger.debug("Addition of obvious bonds failed.")
             mol_after = None
-        else:
-            if sanitize:
-                try:
-                    sanitize_molecule(
-                        mol_after, sanitize_kekulize=True
-                    )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
-                except Exception:
-                    mol_after = None
 
     return mol_after
 

@@ -14,20 +14,17 @@ import os
 from collections import defaultdict
 
 import numpy as np
-from deepdiff import DeepDiff
 
 from qcelemental.physical_constants import constants
 from rdkit import Chem
 from rdkit.Geometry import Point3D
 from rdkit.Chem import GetPeriodicTable
-from rdkit.Chem.rdDetermineBonds import DetermineBondOrders
 from rdkit import RDLogger
 
 import periodictable
-from MDAnalysis.converters.RDKitInferring import MDAnalysisInferrer
 from openbabel import openbabel as ob
 
-from .utils import first_traceback, get_molecular_formula
+from .utils import get_molecular_formula
 from .graph_mapping import (
     find_atom_mapping,
     implicit_hydrogen_atom_mapping,
@@ -40,6 +37,24 @@ from .reference_values import (
     transition_metal_covalent_radii,
     METALS_NUM,
 )
+from tmos._rdkit_bond_typing import determine_bonds, molecule_charge_penalty
+
+__all__ = [
+    "determine_bonds",
+    "molecule_charge_penalty",
+    "assess_atoms",
+    "get_atom_charge",
+    "update_formal_charges",
+    "copy_atom_coords",
+    "qcelemental_to_rdkit",
+    "xyz_to_rdkit",
+    "determine_connectivity",
+    "get_connections",
+    "update_atom_bond_props",
+    "update_bond_order",
+    "get_bo",
+    "add_obvious_bonds",
+]
 
 # Suppress all OpenBabel output including stereochemistry errors
 ob.obErrorLog.SetOutputLevel(0)
@@ -321,10 +336,13 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_toleranc
 
 
 def xyz_to_rdkit(
-    symbols, positions, distance_tolerance=0.2, method="hybrid", ignore_scale=False
+    symbols, positions, distance_tolerance=0.35, method="openbabel", ignore_scale=False
 ):
     """
     Convert a QCElemental molecule to an RDKit molecule.
+
+    If the resulting molecule cannot be sanitized, all bond orders will be single. For more
+    in depth sanitization of bond order assignment, run the molecule through ``determine_bonds``.
 
     Parameters:
     -----------
@@ -345,7 +363,7 @@ def xyz_to_rdkit(
     rdkit.Chem.Mol
         RDKit molecule object
     """
-
+    positions = np.array(positions)
     if len(symbols) != len(positions):
         raise ValueError(
             "Number of provided elements does not match the number of provided positions."
@@ -367,6 +385,7 @@ def xyz_to_rdkit(
     for i, symbol in enumerate(symbols):
         atom = Chem.Atom(symbol)
         atom.SetNoImplicit(True)
+        atom.SetNumExplicitHs(0)
         mol.AddAtom(atom)
 
     # Set 3D coordinates
@@ -398,7 +417,9 @@ def xyz_to_rdkit(
 ###############################################################################
 
 
-def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.2):
+def determine_connectivity(
+    rdkit_mol, method="rdkit", clean_up=True, distance_tolerance=0.2
+):
     """
     Determine connectivity for molecules, particularly transition metal organometallic complexes.
 
@@ -407,8 +428,10 @@ def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.2):
     rdkit_mol : rdkit.Chem.Mol
         RDKit molecule without bonds
     method : str, optional, default='hybrid'
-        Method to use: 'rdkit', 'openbabel', "None", or 'hybrid' where openbabel is attempted and rdkit
-        is the fall back.
+        Method to use: 'rdkit', 'openbabel', or "None".
+    clean_up : bool, optional, default=True
+        Optionally use special rules to determine bonds. Recommended for transition metals.
+        If ``method == None``, this is always ``False``.
     distance_tolerance : float, optional, default=0.1
         Additional tolerance for bond distance cutoffs (Angstroms)
 
@@ -418,13 +441,22 @@ def determine_connectivity(rdkit_mol, method="hybrid", distance_tolerance=0.2):
         RDKit molecule with bonds added
     """
     if method == "openbabel":
-        return _determine_connectivity_openbabel(rdkit_mol)
+        mol = _determine_connectivity_openbabel(rdkit_mol)
     elif method == "rdkit":
-        return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
+        mol = _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
     elif method == "None":
         return rdkit_mol
     else:
-        return _determine_connectivity_hybrid(rdkit_mol, distance_tolerance)
+        raise ValueError(
+            f"Connectivity method, {method}, is not supported. Must be: 'rdkit', 'openbabel', or None"
+        )
+
+    if clean_up:
+        return _determine_connectivity_clean_up(
+            rdkit_mol, max_distance_tolerance=distance_tolerance
+        )
+    else:
+        return mol
 
 
 def _determine_connectivity_openbabel(rdkit_mol):
@@ -433,14 +465,10 @@ def _determine_connectivity_openbabel(rdkit_mol):
     ob_mol = ob.OBMol()
     ob_conv = ob.OBConversion()
     ob_conv.SetInAndOutFormats("mol", "mol")
-    mol_block = Chem.MolToMolBlock(rdkit_mol, forceV3000=True)
+    mol_block = Chem.MolToMolBlock(rdkit_mol)
     ob_conv.ReadString(ob_mol, mol_block)
 
-    # Determine connectivity
     ob_mol.ConnectTheDots()
-    ob_mol.PerceiveBondOrders()
-
-    # Convert back to RDKit
     mol_block_with_bonds = ob_conv.WriteString(ob_mol)
     mol_with_bonds = Chem.MolFromMolBlock(mol_block_with_bonds, sanitize=False)
 
@@ -554,7 +582,33 @@ def _correct_sulfonate_phosphate_interaction(mol, distances, r_cut=3.0, dist_fra
     return block_bond_idx
 
 
-def _determine_connectivity_rdkit(
+def _determine_connectivity_rdkit(mol):
+    """
+    Determine molecular connectivity using RDKit DetermineConnectivity.
+
+    This function analyzes the 3D coordinates of atoms in an RDKit molecule and adds bonds between atoms
+    based on vdW radii.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        The input RDKit molecule, which must have at least one conformer with 3D coordinates.
+
+    Returns
+    -------
+    rdkit.Chem.Mol
+        A new RDKit molecule object with bonds added according to the connectivity rules.
+
+    Raises
+    ------
+    ValueError
+        If the input molecule does not have any conformers.
+    """
+    Chem.rdDetermineBonds.DetermineConnectivity(mol)
+    return mol
+
+
+def _determine_connectivity_clean_up(
     rdkit_mol, max_distance_tolerance=0.2, min_distance_tolerance=0.4
 ):
     """
@@ -602,9 +656,10 @@ def _determine_connectivity_rdkit(
         [conformer.GetAtomPosition(i) for i in range(len(radii))], dtype=float
     )
     distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
-    metal_idx = [
+    metal_indices = [
         a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
-    ][0]
+    ]
+    metal_idx = metal_indices[0] if metal_indices else None
 
     for i in range(mol.GetNumAtoms()):
         for j in range(i + 1, mol.GetNumAtoms()):
@@ -622,24 +677,12 @@ def _determine_connectivity_rdkit(
             ):
                 mol.AddBond(i, j, Chem.BondType.SINGLE)
 
-    for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
-        if mol.GetBondBetweenAtoms(metal_idx, idx) is not None:
-            mol.RemoveBond(metal_idx, idx)
+    if metal_idx is not None:
+        for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
+            if mol.GetBondBetweenAtoms(metal_idx, idx) is not None:
+                mol.RemoveBond(metal_idx, idx)
 
     return mol.GetMol()
-
-
-def _determine_connectivity_hybrid(rdkit_mol, distance_tolerance=0.2):
-    """Use both RDKit and OpenBabel for best results."""
-
-    try:
-        mol_rdkit = _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
-        if mol_rdkit is not None and mol_rdkit.GetNumBonds() > 0:
-            return mol_rdkit
-    except Exception:
-        pass
-
-    return _determine_connectivity_openbabel(rdkit_mol)
 
 
 #############################################################################
@@ -672,249 +715,6 @@ def get_connections(mol, indices=None):
         descriptors[(a.GetSymbol(), a.GetDegree())].append(a.GetIdx())
 
     return descriptors
-
-
-def case_carbon_nitrogen_rings(mol):
-    aromatic_bonds = []
-    positive_charge = []
-    rings = find_molecular_rings(mol_to_graph(mol), min_ring_size=6, max_ring_size=6)
-    logger.debug(f"There are {len(rings)} 6-member rings")
-    for ring in rings:
-        ac = get_connections(mol, ring)
-        if (
-            len(ac[("C", 3)]) == 6
-            or (len(ac[("C", 3)]) == 5 and (len(ac[("N", 3)]) + len(ac[("N", 2)]) == 1))
-            or (len(ac[("C", 3)]) == 4 and (len(ac[("N", 3)]) + len(ac[("N", 2)]) == 2))
-        ):
-            aromatic_bonds.extend(
-                [sorted(ring[x - 1 : x + 1]) for x in range(1, len(ring))]
-                + [sorted([ring[-1], ring[0]])]
-            )
-            if len(ac[("N", 3)]) == 1:
-                positive_charge.append(ac[("N", 3)][0])
-
-    logger.debug(f"There are {len(aromatic_bonds)} aromatic bonds")
-    _, _, charged_atoms_before = assess_atoms(mol)
-    for i, bond in enumerate(mol.GetBonds()):
-        atm1, atm2 = bond.GetBeginAtom(), bond.GetEndAtom()
-        pair = sorted([atm1.GetIdx(), atm2.GetIdx()])
-        if (
-            pair in aromatic_bonds
-            and atm1.GetIdx() in charged_atoms_before
-            and atm2.GetIdx() in charged_atoms_before
-        ):
-            adjacent_bonds = [
-                b for b in aromatic_bonds if len(set(pair).intersection(b)) > 0
-            ]
-            if any(
-                mol.GetBondBetweenAtoms(*b).GetBondTypeAsDouble() == 2.0
-                for b in adjacent_bonds
-            ):
-                bond_order = 1
-            else:
-                bond_order = 2
-            bond.SetBondType(bond_type_dict[bond_order])
-
-    logger.debug(f"There are {len(positive_charge)} charged atoms")
-    for idx in positive_charge:
-        mol.GetAtoms()[idx].SetFormalCharge(1)
-
-    mol.UpdatePropertyCache(strict=False)
-
-
-def case_nitro(mol):
-    """
-    Identify nitro groups (*~N(~O)~O) in the molecule and set them to *-[N+](=O)-[O-],
-    excluding cases where the nitro group is part of *~N(~O)~OH.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        RDKit molecule to modify in place.
-
-    Returns
-    -------
-    None
-        The molecule is modified in place.
-    """
-    nitro_pattern = Chem.MolFromSmarts("[N;X3](~[O;X1])~[O;X1]")
-    matches = mol.GetSubstructMatches(nitro_pattern)
-    for match in matches:
-        central_nitrogen, oxygen1, oxygen2 = match
-
-        nitrogen_atom = mol.GetAtomWithIdx(central_nitrogen)
-        nitrogen_atom.SetFormalCharge(1)
-        nitrogen_atom.SetNoImplicit(True)
-
-        bond1 = mol.GetBondBetweenAtoms(central_nitrogen, oxygen1)
-        bond2 = mol.GetBondBetweenAtoms(central_nitrogen, oxygen2)
-        if bond2.GetBondType() == Chem.BondType.DOUBLE:
-            bond1, bond2 = bond2, bond1
-            oxygen1, oxygen2 = oxygen2, oxygen1
-
-        oxygen_atom1 = mol.GetAtomWithIdx(oxygen1)
-        oxygen_atom1.SetFormalCharge(0)
-        bond1.SetBondType(Chem.BondType.DOUBLE)
-
-        oxygen_atom2 = mol.GetAtomWithIdx(oxygen2)
-        oxygen_atom2.SetFormalCharge(-1)
-        bond2.SetBondType(Chem.BondType.SINGLE)
-
-    mol.UpdatePropertyCache(strict=False)
-
-
-def set_special_cases(mol):
-    """Set aromatic bonds and formal charges for special molecular cases.
-
-    This is to be run before bond determination
-
-    Identifies:
-    1. 6-membered carbon rings: Sets aromatic bond types
-    2. Pyridine-like rings: Sets aromatic bond types
-    3. Quaternary nitrogens: Assigns positive charges
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        RDKit molecule to modify in place.
-    """
-    mol = copy.deepcopy(mol)
-    mol.UpdatePropertyCache(strict=False)
-    if any(atm.GetNumImplicitHs() > 0 for atm in mol.GetAtoms()):
-        raise ValueError("Provided molecule has implicit hydrogen atoms.")
-
-    case_nitro(mol)
-    case_carbon_nitrogen_rings(mol)
-
-    # Set positive charge: Nitrogen with 4 connections
-    positive_charges = get_connections(mol)[("N", 4)]
-    logger.debug(f"There are {len(positive_charges)} charged atoms")
-    for idx in positive_charges:
-        mol.GetAtoms()[idx].SetFormalCharge(1)
-
-    mol.UpdatePropertyCache(strict=False)
-
-    return mol
-
-
-def correct_special_cases(mol):
-    # Resolve the following CCD structures: 'KHK', 'N7H', 'NTE', 'NXC', 'SXC', 'T8K', 'U0J', 'VL2'
-    case_nitro(mol)
-
-
-def determine_bonds_mda(mol):
-    """Determine bond orders with MDAnalysis, or None if failed.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        RDKit molecule that needs to be updated
-
-    Returns
-    -------
-    mol : rdkit.Chem.Mol
-        New RDKit molecule from mdanalysis determination of bond orders. Note that atom
-        properties may have been lost. Returns None if bond determination failed.
-    """
-    mol = set_special_cases(mol)
-    totalcharge, _, charged_atoms_before = assess_atoms(mol)
-
-    try:
-        mol = Chem.RWMol(mol)
-        MolBondInferrer = MDAnalysisInferrer(max_iter=10000)
-        mol = MolBondInferrer(mol)
-        _, _, charged_atoms_after = assess_atoms(mol)
-
-        if (
-            len(DeepDiff(charged_atoms_before, charged_atoms_after)) == 0
-            and totalcharge != 0
-        ):
-            logger.debug("MDAnalysis failed to determine molecular bond orders.")
-            mol = None
-    except Exception:
-        logger.trace(first_traceback())
-        logger.debug("MDAnalysis failed to determine molecular bond orders.")
-        mol = None
-
-    return mol
-
-
-def determine_bonds_rdkit(mol, charge=0):
-    """Determine bond orders with RDKit, or None if failed.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        RDKit molecule that needs to be updated
-    charge : int
-        Set the charge of the molecule when determining the bond orders
-
-    Returns
-    -------
-    mol : rdkit.Chem.Mol
-        New RDKit molecule from rdkit determination of bond orders. Note that atom
-        properties may have been lost. Returns None if bond determination failed.
-    """
-    mol = set_special_cases(mol)
-    mol = Chem.RWMol(mol)
-    try:
-        DetermineBondOrders(
-            mol, charge=charge, maxIterations=1000, allowChargedFragments=False
-        )
-    except Exception:
-        logger.debug(first_traceback())
-        logger.debug("RDKit failed to determine molecular bond orders.")
-        mol = None
-
-    return mol
-
-
-def determine_bonds_openbabel(mol):
-    """Determine bond orders with Open Babel, or None if failed.
-
-    Note that atom properties may have been lost and the default from openbabel is to
-    process the molecule with implicit hydrogens only, so all hydrogens and their positions
-    are deleted and then optionally restores with approximate coordinates.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        RDKit molecule that needs to be updated
-
-    Returns
-    -------
-    mol : rdkit.Chem.Mol
-        New RDKit molecule from openbabel determination of bond orders. Note that atom
-        properties may have been lost. Returns None if bond determination failed.
-    """
-    mol = set_special_cases(mol)
-    mol = Chem.RWMol(mol)
-    mol.UpdatePropertyCache(strict=False)
-
-    obConversion = ob.OBConversion()
-    obConversion.SetInAndOutFormats("mol", "mol")
-    obMol = ob.OBMol()
-    obConversion.ReadString(obMol, Chem.MolToMolBlock(mol, forceV3000=True))
-    for _ in range(5):
-        obMol.PerceiveBondOrders()
-    aromatyper = ob.OBAromaticTyper()
-    aromatyper.AssignAromaticFlags(obMol)
-    obMol.PerceiveBondOrders()
-    mol_block_processed = obConversion.WriteString(obMol)
-    # sanitize=False needed for 5 member rings in porphyrins
-    mol_openbabel = Chem.MolFromMolBlock(mol_block_processed, sanitize=False)
-
-    if mol_openbabel is not None and any(
-        b.GetBondType().name == "UNSPECIFIED" for b in mol_openbabel.GetBonds()
-    ):
-        mol_openbabel = None
-
-    if mol_openbabel is None:
-        logger.debug("Openbabel failed to determine molecular bond orders.")
-    else:
-        mol_openbabel.UpdatePropertyCache(strict=False)
-
-    return mol_openbabel
 
 
 def update_atom_bond_props(mol_to_change, mol_reference):
