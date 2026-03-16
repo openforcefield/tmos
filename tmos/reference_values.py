@@ -16,6 +16,7 @@ import numpy as np
 from rdkit import Chem
 
 METALS_NUM = [
+    3,
     12,
     21,
     22,
