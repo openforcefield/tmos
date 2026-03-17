@@ -10,8 +10,11 @@ Public API
 - ``molecule_charge_penalty``: score formal-charge placement for optimization.
 """
 
+import contextlib
 import os
+import time
 
+import networkx as nx
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdDetermineBonds
@@ -19,6 +22,47 @@ from rdkit.Chem.rdDetermineBonds import DetermineBondOrders
 from openbabel import openbabel as ob
 
 import tmos
+
+# ---------------------------------------------------------------------------
+# Stage-timing profiling state (module-level accumulators)
+# ---------------------------------------------------------------------------
+#: Cumulative wall-clock seconds per stage key across all determine_bonds calls.
+_STAGE_TIMINGS: dict = {}
+#: Cumulative call counts per stage key.
+_STAGE_COUNTS: dict = {}
+
+
+def reset_stage_timings() -> None:
+    """Clear accumulated stage timing and call-count data."""
+    _STAGE_TIMINGS.clear()
+    _STAGE_COUNTS.clear()
+
+
+def get_stage_timings() -> dict:
+    """Return a snapshot of cumulative stage timings and call counts.
+
+    Returns
+    -------
+    dict
+        ``{stage_name: {"time": float, "calls": int}}`` for every recorded stage.
+    """
+    return {
+        k: {"time": _STAGE_TIMINGS[k], "calls": _STAGE_COUNTS.get(k, 0)}
+        for k in _STAGE_TIMINGS
+    }
+
+
+@contextlib.contextmanager
+def _time_stage(name: str):
+    """Context manager to accumulate wall-clock time for *name*."""
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - t0
+        _STAGE_TIMINGS[name] = _STAGE_TIMINGS.get(name, 0.0) + elapsed
+        _STAGE_COUNTS[name] = _STAGE_COUNTS.get(name, 0) + 1
+
 
 # Suppress OpenBabel logging
 ob.obErrorLog.SetOutputLevel(0)
@@ -424,100 +468,74 @@ def _apply_alternating_path_shift_via_kekulize(mol, path, first_delta=1):
     return shifted
 
 
-def _ring_paths_between_atoms(mol, idx_a, idx_b, max_path=8):
-    """Return atom-index paths between idx_a and idx_b along shared rings.
+def _compute_path_deltas(mol, path, first_delta=1):
+    """Check path-move feasibility and return per-atom BV deltas without copying *mol*.
 
-    For each ring containing both atoms, return both directed paths around the
-    ring (clockwise/counterclockwise). This enables evaluating "arrow pushing
-    the other way around the ring" when one direction overcharges an atom.
+    Performs the same phase-1 checks as :func:`_apply_alternating_path_shift`
+    (H atoms, bond existence, order bounds 1–3, atom BV caps) purely through
+    arithmetic on the existing molecule — no ``RWMol`` is ever constructed.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+    path : list[int]
+        Ordered atom indices along the path.
+    first_delta : int
+        +1 or −1 for the first bond on the path.
+
+    Returns
+    -------
+    dict[int, int] or None
+        Map of atom index → cumulative BV change for every atom on the path.
+        ``None`` if the move is infeasible for any reason.
     """
-    paths = []
-    seen = set()
-    ring_info = mol.GetRingInfo()
-    for ring in ring_info.AtomRings():
-        if idx_a not in ring or idx_b not in ring:
-            continue
-        ring_list = list(ring)
-        ia = ring_list.index(idx_a)
-        ib = ring_list.index(idx_b)
+    if len(path) < 2:
+        return None
 
-        # Forward path ia -> ib
-        if ia <= ib:
-            path_f = ring_list[ia : ib + 1]
-        else:
-            path_f = ring_list[ia:] + ring_list[: ib + 1]
+    atom_delta = {}
+    for i, (idx_a, idx_b) in enumerate(zip(path[:-1], path[1:])):
+        atom_a = mol.GetAtomWithIdx(idx_a)
+        atom_b = mol.GetAtomWithIdx(idx_b)
+        if atom_a.GetAtomicNum() == 1 or atom_b.GetAtomicNum() == 1:
+            return None
+        bond = mol.GetBondBetweenAtoms(idx_a, idx_b)
+        if bond is None:
+            return None
+        delta = first_delta if i % 2 == 0 else -first_delta
+        order = int(bond.GetBondTypeAsDouble())
+        new_order = order + delta
+        if new_order < 1 or new_order > 3:
+            return None
+        atom_delta[idx_a] = atom_delta.get(idx_a, 0) + delta
+        atom_delta[idx_b] = atom_delta.get(idx_b, 0) + delta
 
-        # Backward path ia -> ib (the opposite ring direction)
-        ring_rev = [ring_list[ia]] + list(
-            reversed(ring_list[:ia] + ring_list[ia + 1 :])
-        )
-        ib_rev = ring_rev.index(idx_b)
-        path_b = ring_rev[: ib_rev + 1]
+    for idx, delta in atom_delta.items():
+        atom = mol.GetAtomWithIdx(idx)
+        new_bv = _bond_valence(atom, integer=True) + delta
+        if new_bv < 0 or new_bv > _max_allowed_int_bv(atom):
+            return None
 
-        for path in (path_f, path_b):
-            n_bonds = len(path) - 1
-            if n_bonds < 1 or n_bonds > max_path:
-                continue
-            tup = tuple(path)
-            if tup in seen:
-                continue
-            seen.add(tup)
-            paths.append(path)
-
-    return paths
+    return atom_delta
 
 
-def _all_paths_between_atoms(mol, idx_a, idx_b, max_path=8, max_paths_per_pair=64):
-    """Enumerate candidate paths between two atoms.
+def _generate_paths_between_atoms(mol, idx_a, idx_b, graph=None):
+    """Yield candidate paths between two atoms lazily.
 
-    Prefers ``tmos.graph_mapping.find_all_paths`` when available to capture
-    non-shortest alternatives (critical for ring-direction resonance moves).
-    Falls back to shortest-path + ring-path enumeration.
+    Paths are generated one-by-one (without materializing the full set) so
+    callers can evaluate each path and stop as soon as they find an improving
+    move. Path generation is exhaustive over simple paths in the heavy-atom
+    graph.
     """
-    seen = set()
-    paths = []
+    if graph is None:
+        graph = tmos.graph_mapping.mol_to_graph(mol, remove_hydrogens=True)
 
-    # Fallback shortest path
-    shortest = Chem.rdmolops.GetShortestPath(mol, idx_a, idx_b)
-    if shortest:
-        n_bonds = len(shortest) - 1
-        if 1 <= n_bonds <= max_path:
-            tup = tuple(shortest)
-            if tup not in seen:
-                seen.add(tup)
-                paths.append(list(shortest))
-
-    # Fallback ring alternatives
-    for ring_path in _ring_paths_between_atoms(mol, idx_a, idx_b, max_path=max_path):
-        tup = tuple(ring_path)
-        if tup in seen:
-            continue
-        seen.add(tup)
-        paths.append(list(ring_path))
-
-    # Preferred: all simple paths via tmos graph mapping
-    if paths:
-        try:
-            graph = tmos.graph_mapping.mol_to_graph(mol)
-            all_paths = tmos.graph_mapping.find_all_paths(
-                graph, idx_a, idx_b, cutoff=max_path
-            )
-            for path in all_paths:
-                n_bonds = len(path) - 1
-                if n_bonds < 1 or n_bonds > max_path:
-                    continue
-                tup = tuple(path)
-                if tup in seen:
-                    continue
-                seen.add(tup)
-                paths.append(list(path))
-                if len(paths) >= max_paths_per_pair:
-                    break
-        except Exception:
-            pass
-
-    paths.sort(key=lambda p: len(p))
-    return paths[:max_paths_per_pair]
+    try:
+        for path in nx.all_simple_paths(graph, idx_a, idx_b):
+            if len(path) < 2:
+                continue
+            yield list(path)
+    except Exception:
+        return
 
 
 def _set_bond_order_int(bond, order):
@@ -616,15 +634,11 @@ class _GraphMoveEngine:
     def __init__(
         self,
         max_iters=24,
-        max_path=12,
-        max_paths_per_pair=128,
         use_relay=True,
         use_paths=True,
         path_mode="charged_sinks",
     ):
         self.max_iters = max_iters
-        self.max_path = max_path
-        self.max_paths_per_pair = max_paths_per_pair
         self.use_relay = use_relay
         self.use_paths = use_paths
         self.path_mode = path_mode
@@ -709,38 +723,68 @@ class _GraphMoveEngine:
         base,
         src,
         dst,
-        max_path,
-        max_paths_per_pair,
         require_dst_improve,
+        graph=None,
     ):
         base_obj = _charge_objective(base)
         base_score = _charge_score(base)
         src_penalty_base = cls._atom_site_penalty(base, src)
         dst_penalty_base = cls._atom_site_penalty(base, dst)
 
-        paths = _all_paths_between_atoms(
-            base,
-            src,
-            dst,
-            max_path=max_path,
-            max_paths_per_pair=max_paths_per_pair,
-        )
-        paths_by_length = {}
-        for path in paths:
-            length = len(path) - 1
-            paths_by_length.setdefault(length, []).append(path)
+        with _time_stage("path_enum"):
+            path_iter = _generate_paths_between_atoms(
+                base,
+                src,
+                dst,
+                graph=graph,
+            )
 
-        for length in sorted(paths_by_length):
-            tier_best = None
-            tier_best_score = None
-            tier_best_obj = None
-            for path in paths_by_length[length]:
+        src_atom = base.GetAtomWithIdx(src)
+        src_fc_base = src_atom.GetFormalCharge()
+        src_bv_base = _bond_valence(src_atom)  # float, used for shell estimate
+        src_cur_penalty = _atom_charge_penalty(src_atom.GetAtomicNum(), src_fc_base)
+        dst_atom = base.GetAtomWithIdx(dst)
+        dst_fc_base = dst_atom.GetFormalCharge()
+        dst_bv_base = _bond_valence(dst_atom)
+        dst_cur_penalty = _atom_charge_penalty(dst_atom.GetAtomicNum(), dst_fc_base)
+
+        with _time_stage("path_eval"):
+            for path in path_iter:
+                path_atom_set = set(path)
                 for first_delta in (1, -1):
+                    atom_delta = _compute_path_deltas(base, path, first_delta)
+                    if atom_delta is None:
+                        continue
+
+                    src_delta = atom_delta[src]
+                    src_bv_est = src_bv_base + src_delta
+                    src_shell_est = _best_shell(src_atom, src_bv_est)
+                    if src_shell_est is not None:
+                        src_fc_est = int(round(src_bv_est - src_shell_est))
+                        if (
+                            _atom_charge_penalty(src_atom.GetAtomicNum(), src_fc_est)
+                            >= src_cur_penalty
+                        ):
+                            continue
+
+                    if require_dst_improve:
+                        dst_delta = atom_delta[dst]
+                        dst_bv_est = dst_bv_base + dst_delta
+                        dst_shell_est = _best_shell(dst_atom, dst_bv_est)
+                        if dst_shell_est is not None:
+                            dst_fc_est = int(round(dst_bv_est - dst_shell_est))
+                            if (
+                                _atom_charge_penalty(
+                                    dst_atom.GetAtomicNum(), dst_fc_est
+                                )
+                                >= dst_cur_penalty
+                            ):
+                                continue
+
                     candidate = engine._apply_path_move(base, path, first_delta)
                     if candidate is None:
                         continue
-                    candidate = engine._prep_candidate(candidate)
-                    candidate = _reduce_charge_by_bond_promotion(candidate)
+                    candidate = _assign_formal_charges_local(candidate, path_atom_set)
 
                     cand_score = _charge_score(candidate)
                     cand_obj = _charge_objective(candidate)
@@ -756,20 +800,22 @@ class _GraphMoveEngine:
                     if require_dst_improve and dst_penalty_cand >= dst_penalty_base:
                         continue
 
-                    if (
-                        tier_best is None
-                        or tier_best_score is None
-                        or cand_score < tier_best_score
-                        or (
-                            cand_score == tier_best_score
-                            and (tier_best_obj is None or cand_obj < tier_best_obj)
-                        )
-                    ):
-                        tier_best = candidate
-                        tier_best_score = cand_score
-                        tier_best_obj = cand_obj
-            if tier_best is not None:
-                return tier_best
+                    promoted = _reduce_charge_by_bond_promotion(Chem.Mol(candidate))
+                    promoted_score = _charge_score(promoted)
+                    promoted_obj = _charge_objective(promoted)
+                    if promoted_score > base_score:
+                        return candidate
+                    if promoted_score == base_score and promoted_obj >= base_obj:
+                        return candidate
+
+                    promoted_src_penalty = cls._atom_site_penalty(promoted, src)
+                    promoted_dst_penalty = cls._atom_site_penalty(promoted, dst)
+                    if promoted_src_penalty >= src_penalty_base:
+                        return candidate
+                    if require_dst_improve and promoted_dst_penalty >= dst_penalty_base:
+                        return candidate
+
+                    return promoted
 
         return None
 
@@ -987,26 +1033,89 @@ class _GraphMoveEngine:
         target = list(active_atoms) + sinks
         return source, target
 
-    def _iter_path_moves(self, mol):
+    def _iter_path_moves(
+        self,
+        mol,
+        graph=None,
+    ):
         source_atoms, target_atoms = self._path_source_target_atoms(mol)
+
+        endpoint_scores_cache = {}
+
+        def _endpoint_delta_scores(atom_idx):
+            cached = endpoint_scores_cache.get(atom_idx)
+            if cached is not None:
+                return cached
+
+            atom = mol.GetAtomWithIdx(atom_idx)
+            if atom.GetAtomicNum() in (0, 1):
+                scores = {1: 0, -1: 0}
+                endpoint_scores_cache[atom_idx] = scores
+                return scores
+
+            # Radical sites are hard constraints; do not over-fit direction here.
+            if atom.GetNumRadicalElectrons() > 0:
+                scores = {1: 0, -1: 0}
+                endpoint_scores_cache[atom_idx] = scores
+                return scores
+
+            current_fc = atom.GetFormalCharge()
+            current_penalty = _atom_charge_penalty(atom.GetAtomicNum(), current_fc)
+            current_bv = _bond_valence(atom)
+
+            scores = {1: 0, -1: 0}
+            for delta in (1, -1):
+                new_bv = current_bv + delta
+                if new_bv < 0 or new_bv > _max_allowed_int_bv(atom):
+                    continue
+
+                shell = _best_shell(atom, new_bv)
+                if shell is None:
+                    continue
+
+                new_fc = int(round(new_bv - shell))
+                new_penalty = _atom_charge_penalty(atom.GetAtomicNum(), new_fc)
+                scores[delta] = max(0, current_penalty - new_penalty)
+
+            endpoint_scores_cache[atom_idx] = scores
+            return scores
+
         seen_paths = set()
         for src in source_atoms:
+            src_scores = _endpoint_delta_scores(src)
             for dst in target_atoms:
                 if src == dst:
                     continue
-                for path in _all_paths_between_atoms(
+
+                dst_scores = _endpoint_delta_scores(dst)
+                # Pair-level pre-screen: skip if endpoint states suggest no
+                # local penalty reduction in either direction.
+                if max(src_scores.values()) <= 0 and max(dst_scores.values()) <= 0:
+                    continue
+
+                for path in _generate_paths_between_atoms(
                     mol,
                     src,
                     dst,
-                    max_path=self.max_path,
-                    max_paths_per_pair=self.max_paths_per_pair,
+                    graph=graph,
                 ):
                     key = tuple(path)
                     if key in seen_paths:
                         continue
                     seen_paths.add(key)
-                    yield path, 1
-                    yield path, -1
+
+                    odd_edges = (len(path) - 1) % 2 == 1
+                    dst_delta_if_pos = 1 if odd_edges else -1
+                    dst_delta_if_neg = -1 if odd_edges else 1
+
+                    pos_score = 2 * src_scores[1] + dst_scores[dst_delta_if_pos]
+                    neg_score = 2 * src_scores[-1] + dst_scores[dst_delta_if_neg]
+
+                    if pos_score <= 0 and neg_score <= 0:
+                        continue
+
+                    first_delta = 1 if pos_score >= neg_score else -1
+                    yield path, first_delta
 
     @staticmethod
     def _apply_path_move(mol, path, first_delta):
@@ -1029,6 +1138,13 @@ class _GraphMoveEngine:
                 work = Chem.Mol(mol)
             work = _assign_formal_charges(work)
 
+            # Build H-free graph once per iteration; shared across all path moves.
+            iter_graph = (
+                tmos.graph_mapping.mol_to_graph(work, remove_hydrogens=True)
+                if self.use_paths
+                else None
+            )
+
             best_mol = None
             best_obj = current_obj
 
@@ -1044,7 +1160,10 @@ class _GraphMoveEngine:
                         best_mol = candidate
 
             if self.use_paths:
-                for path, first_delta in self._iter_path_moves(work):
+                for path, first_delta in self._iter_path_moves(
+                    work,
+                    graph=iter_graph,
+                ):
                     candidate = self._apply_path_move(work, path, first_delta)
                     if candidate is None:
                         continue
@@ -1053,6 +1172,12 @@ class _GraphMoveEngine:
                     if cand_obj < best_obj:
                         best_obj = cand_obj
                         best_mol = candidate
+                        break
+
+                if best_mol is not None and best_obj < current_obj:
+                    mol = best_mol
+                    current_obj = best_obj
+                    continue
 
             if best_mol is None:
                 break
@@ -1241,41 +1366,21 @@ class _GraphMoveEngine:
         return partial
 
     @classmethod
-    def _apply_tmos_obvious_bonds(cls, mol, degree_of_separation=8):
-        """Apply tmos global bond-order correction when available."""
-
-        rw = Chem.RWMol(mol)
-        try:
-            tmos.build_rdmol.add_obvious_bonds(
-                rw, degree_of_separation=degree_of_separation
-            )
-        except Exception:
-            return mol
-
-        out = rw.GetMol()
-        out = _fix_overvalenced(out)
-        out = _assign_formal_charges(out)
-        return out
-
-    @classmethod
     def _path_lookahead_first_improvement(
         cls,
         mol,
-        max_path=12,
-        max_paths_per_pair=128,
         path_mode="charged_sinks",
+        max_active_sources=8,
+        max_partners=16,
     ):
-        """Try path moves shortest→longest and accept first improving length tier.
+        """Try lazy path moves and accept the first improving candidate.
 
-        For each path length L (starting from shortest), evaluate all candidate
-        path moves of that length and pick the best objective at length L.
-        Return immediately when any improving candidate exists at L; otherwise
-        continue to the next longer length.
+        Source/target pairs are prioritized by active-site penalties and each
+        pair consumes generated paths one-by-one, returning immediately when an
+        improving move is found.
         """
         engine = cls(
             max_iters=1,
-            max_path=max_path,
-            max_paths_per_pair=max_paths_per_pair,
             use_relay=False,
             use_paths=True,
             path_mode=path_mode,
@@ -1286,19 +1391,31 @@ class _GraphMoveEngine:
         if kek is not None:
             base = _assign_formal_charges(kek)
         active_atoms = cls._priority_active_atoms(base)
+        if not active_atoms:
+            return base
+
+        # Bound pair exploration to highest-penalty sites first.
+        active_atoms = active_atoms[:max_active_sources]
+
+        # Build H-free graph once for all (src, dst) pair lookups in this call.
+        graph = tmos.graph_mapping.mol_to_graph(base, remove_hydrogens=True)
 
         # 1) High-penalty atom pairs first: require both atoms to improve.
         for src in active_atoms:
-            for dst in cls._priority_partner_atoms(base, src, include_zero=True):
+            for dst in cls._priority_partner_atoms(
+                base,
+                src,
+                include_zero=True,
+                max_partners=max_partners,
+            ):
                 dst_penalty = cls._atom_site_penalty(base, dst)
                 candidate = cls._best_path_move_between_pair(
                     engine,
                     base,
                     src,
                     dst,
-                    max_path=max_path,
-                    max_paths_per_pair=max_paths_per_pair,
                     require_dst_improve=dst_penalty > 0,
+                    graph=graph,
                 )
                 if candidate is not None:
                     return candidate
@@ -1314,9 +1431,8 @@ class _GraphMoveEngine:
                     base,
                     src,
                     sink,
-                    max_path=max_path,
-                    max_paths_per_pair=max_paths_per_pair,
                     require_dst_improve=False,
+                    graph=graph,
                 )
                 if candidate is not None:
                     return candidate
@@ -1326,46 +1442,68 @@ class _GraphMoveEngine:
     @classmethod
     def _stage_once(cls, mol, local_engine, global_engine):
         """Run one deterministic cleanup stage sequence."""
-        mol = _fix_overvalenced(mol)
-        mol = _promote_underbonded(mol)
-        mol = _assign_formal_charges(mol)
-        mol = _convert_radical_carbocations(mol)
-        mol = _reduce_charge_by_bond_promotion(mol)
-        mol = cls._promote_atom_neighbors_greedy(mol)
+        with _time_stage("fix_overvalenced"):
+            mol = _fix_overvalenced(mol)
+        with _time_stage("promote_underbonded"):
+            mol = _promote_underbonded(mol)
+        with _time_stage("assign_formal_charges"):
+            mol = _assign_formal_charges(mol)
+        with _time_stage("convert_radical_carbocations"):
+            mol = _convert_radical_carbocations(mol)
+        with _time_stage("reduce_charge_by_bond_promotion"):
+            mol = _reduce_charge_by_bond_promotion(mol)
+        with _time_stage("promote_atom_neighbors_greedy"):
+            mol = cls._promote_atom_neighbors_greedy(mol)
 
         move_base = cls._kekulized_or_none(Chem.Mol(mol))
         if move_base is None:
             move_base = Chem.Mol(mol)
         move_base = _assign_formal_charges(move_base)
+        has_active_sites = bool(cls._priority_active_atoms(move_base))
 
-        path_candidate = cls._path_lookahead_first_improvement(
-            Chem.Mol(move_base),
-            max_path=15,
-            max_paths_per_pair=256,
-            path_mode="charged_sinks",
-        )
-        mol = cls._prefer_lower_penalty(mol, path_candidate)
+        if has_active_sites:
+            with _time_stage("path_lookahead_charged_sinks"):
+                path_candidate = cls._path_lookahead_first_improvement(
+                    Chem.Mol(move_base),
+                    path_mode="charged_sinks",
+                    max_active_sources=4,
+                    max_partners=8,
+                )
+            mol = cls._prefer_lower_penalty(mol, path_candidate)
 
-        local_candidate = local_engine.optimize(Chem.Mol(mol))
+        has_active_sites = bool(cls._priority_active_atoms(mol))
+        with _time_stage("local_engine_optimize"):
+            local_candidate = (
+                local_engine.optimize(Chem.Mol(mol))
+                if has_active_sites
+                else Chem.Mol(mol)
+            )
         mol = cls._prefer_lower_penalty(mol, local_candidate)
 
-        negpos_path_candidate = cls._path_lookahead_first_improvement(
-            Chem.Mol(mol),
-            max_path=10,
-            max_paths_per_pair=128,
-            path_mode="neg_pos",
-        )
-        mol = cls._prefer_lower_penalty(mol, negpos_path_candidate)
+        has_active_sites = bool(cls._priority_active_atoms(mol))
+        if has_active_sites:
+            with _time_stage("path_lookahead_neg_pos"):
+                negpos_path_candidate = cls._path_lookahead_first_improvement(
+                    Chem.Mol(mol),
+                    path_mode="neg_pos",
+                    max_active_sources=4,
+                    max_partners=6,
+                )
+            mol = cls._prefer_lower_penalty(mol, negpos_path_candidate)
 
-        tmos_candidate = cls._apply_tmos_obvious_bonds(Chem.Mol(mol))
-        mol = cls._prefer_lower_penalty(mol, tmos_candidate)
-
-        global_candidate = global_engine.optimize(Chem.Mol(mol))
+        has_active_sites = bool(cls._priority_active_atoms(mol))
+        with _time_stage("global_engine_optimize"):
+            global_candidate = (
+                global_engine.optimize(Chem.Mol(mol))
+                if has_active_sites
+                else Chem.Mol(mol)
+            )
         mol = cls._prefer_lower_penalty(mol, global_candidate)
 
-        mol = _prepare_for_cleanup(mol)
-        mol = _fix_overvalenced(mol)
-        mol = _assign_formal_charges(mol)
+        with _time_stage("stage_finalize"):
+            mol = _prepare_for_cleanup(mol)
+            mol = _fix_overvalenced(mol)
+            mol = _assign_formal_charges(mol)
         return mol
 
     @classmethod
@@ -1378,17 +1516,13 @@ class _GraphMoveEngine:
         work = _prepare_for_cleanup(Chem.Mol(mol))
 
         local_engine = cls(
-            max_iters=10,
-            max_path=15,
-            max_paths_per_pair=256,
+            max_iters=3,
             use_relay=True,
             use_paths=True,
             path_mode="charged_sinks",
         )
         global_engine = cls(
-            max_iters=18,
-            max_path=10,
-            max_paths_per_pair=128,
+            max_iters=4,
             use_relay=False,
             use_paths=True,
             path_mode="neg_pos",
@@ -1406,6 +1540,12 @@ class _GraphMoveEngine:
 
             work = cls._stage_once(work, local_engine, global_engine)
             work_objective = _charge_objective(work)
+            if (
+                work_objective[0] == 0
+                and work_objective[2] == 0
+                and work_objective[3] == 0
+            ):
+                break
             if work_objective >= last_work_objective:
                 stagnant_rounds += 1
             else:
@@ -1413,10 +1553,10 @@ class _GraphMoveEngine:
             last_work_objective = work_objective
 
             after = _molecule_state_fingerprint(work)
-            if after == before or stagnant_rounds >= 2:
+            if after == before or stagnant_rounds >= 1:
                 break
 
-        for _ in range(3):
+        for _ in range(2):
             sanitized = cls._sanitize_candidate_or_none(work)
             if sanitized is not None:
                 forced = cls._force_charge_balance(sanitized)
@@ -1674,6 +1814,52 @@ def _assign_formal_charges(mol):
     return mol
 
 
+def _assign_formal_charges_local(mol, atom_indices):
+    """Reassign formal charges only for *atom_indices*.
+
+    Equivalent to :func:`_assign_formal_charges` restricted to the given set
+    of atom indices.  For a path move only the path atoms have changed bond
+    orders, so there is no need to re-derive charges for the rest of the
+    molecule.  ``_enforce_target_charge`` is still called globally at the end
+    because net-charge balancing may touch any atom.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        Molecule with explicit bond orders (modified in-place).
+    atom_indices : iterable[int]
+        Atom indices to update.
+
+    Returns
+    -------
+    rdkit.Chem.Mol
+    """
+    for idx in atom_indices:
+        atom = mol.GetAtomWithIdx(idx)
+        if atom.GetAtomicNum() == 0:
+            continue
+        if atom.GetAtomicNum() == 1:
+            atom.SetFormalCharge(0)
+            continue
+        bv = _bond_valence(atom)
+        best = _best_shell(atom, bv)
+        if best is None:
+            continue
+        atom.SetFormalCharge(int(round(bv - best)))
+        # Tricoordinate carbocation special case (mirrors _assign_formal_charges).
+        if (
+            atom.GetAtomicNum() == 6
+            and atom.GetFormalCharge() == 0
+            and abs(bv - 3.0) < 0.2
+            and all(int(b.GetBondTypeAsDouble()) == 1 for b in atom.GetBonds())
+            and atom.GetTotalNumHs() == 0
+        ):
+            atom.SetFormalCharge(1)
+    mol = _enforce_target_charge(mol)
+    mol.UpdatePropertyCache(strict=False)
+    return mol
+
+
 def _reduce_charge_by_bond_promotion(mol):
     """Absorb spurious negative charges into higher-order bonds.
 
@@ -1897,11 +2083,6 @@ def _molecule_state_fingerprint(mol):
     return (atom_state, bond_state)
 
 
-# ---------------------------------------------------------------------------
-# Public functions
-# ---------------------------------------------------------------------------
-
-
 def _restore_explicit_hydrogen_flags(mol):
     """Re-apply explicit-hydrogen atom flags after MOL-block round-trip."""
     rw = Chem.RWMol(mol)
@@ -1954,6 +2135,11 @@ def _initial_bonding_obabel(mol, charge=None):
     return _restore_explicit_hydrogen_flags(out)
 
 
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+
 def determine_bonds(
     mol,
     charge=None,
@@ -2002,21 +2188,18 @@ def determine_bonds(
             f"method={method!r} is not supported; choose 'rdkit' or 'obabel'."
         )
 
-    mol = backend(mol, charge)
+    with _time_stage("initial_bonding"):
+        mol = backend(mol, charge)
     mol.UpdatePropertyCache(strict=False)
 
     if custom_cleanup:
-        mol = _GraphMoveEngine.cleanup_best(mol, max_rounds=cleanup_max_iters)
+        with _time_stage("cleanup_best"):
+            mol = _GraphMoveEngine.cleanup_best(mol, max_rounds=cleanup_max_iters)
         if (
             charge is not None
             and sum([a.GetFormalCharge() for a in mol.GetAtoms()]) != charge
         ):
             raise ValueError("Inconsistent charge with target!")
-
-    try:
-        Chem.SanitizeMol(mol)
-    except Exception:
-        mol = _GraphMoveEngine.finalize_sanitized(mol)
 
     Chem.SanitizeMol(mol)
 
