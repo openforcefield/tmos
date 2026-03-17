@@ -10,6 +10,7 @@ Such functions include:
 import copy
 from loguru import logger
 import os
+from typing import Protocol, TypeAlias, TypedDict
 
 import numpy as np
 
@@ -18,6 +19,7 @@ from rdkit import Chem
 from rdkit.Geometry import Point3D
 from rdkit.Chem import GetPeriodicTable
 from rdkit import RDLogger
+from rdkit.Chem.rdchem import Atom, Mol
 
 import periodictable
 from openbabel import openbabel as ob
@@ -35,7 +37,7 @@ from .reference_values import (
 )
 from tmos._rdkit_bond_typing import determine_bonds, molecule_charge_penalty
 
-__all__ = [
+__all__: list[str] = [
     "determine_bonds",
     "molecule_charge_penalty",
     "assess_atoms",
@@ -57,32 +59,54 @@ os.environ["BABEL_SILENCE"] = "1"
 RDLogger.DisableLog("rdApp.*")
 pt = GetPeriodicTable()
 
+BondOrderTuple: TypeAlias = tuple[str, int, str, int, str, int]
+
+
+class ChargedAtomInfo(TypedDict):
+    """Per-atom charge diagnostics produced by `assess_atoms`."""
+
+    symbol: str
+    charge: int | float
+    bond_orders: list[BondOrderTuple]
+
+
+class QCEleMoleculeLike(Protocol):
+    """Structural typing interface for QCElemental-like molecules."""
+
+    symbols: list[str]
+    geometry: np.ndarray | None
+    connectivity: list[tuple[int, int, int | float]] | None
+
+
 #############################################################################
 ############################## Atom Assessment ##############################
 #############################################################################
 
 
-def get_atom_charge(atom, ignore_multiple_charges=True, use_formal_charge=False):
-    """Get the effective charge of an atom based on its default valence and total bond orders.
+def get_atom_charge(
+    atom: Atom,
+    ignore_multiple_charges: bool = True,
+    use_formal_charge: bool = False,
+) -> int | float:
+    """Estimate atom charge from valence and bond-order balance.
 
     Parameters
     ----------
     atom : rdkit.Chem.rdchem.Atom
         RDKit atom to assess.
-    ignore_multiple_charges : bool, optional, default=True
+    ignore_multiple_charges : bool, default=True
         If False, raises an error when multiple possible charges are encountered;
         otherwise, selects the lowest charge. This is relevant for atoms like sulfur
         that can have multiple charge states.
-    use_formal_charge : bool, optional, default=False
+    use_formal_charge : bool, default=False
         Whether to use the atomic formal charge. If True, the output is the number
         of hanging bonds (negative for hanging, positive for excess). Either may
         indicate that the formal charge of the atom should be updated.
 
     Returns
     -------
-    float
-        The formal charge of the atom. May be fractional if aromatics are involved.
-        If `use_formal_charge` is True, returns the number of excess bonds.
+    int or float
+        Charge-like balance value. May be fractional for aromatic contexts.
 
     Raises
     ------
@@ -92,7 +116,7 @@ def get_atom_charge(atom, ignore_multiple_charges=True, use_formal_charge=False)
 
     Notes
     -----
-    If multiple possible charges are found and `ignore_multiple_charges` is True,
+    If multiple possible charges are found and ``ignore_multiple_charges`` is ``True``,
     the lowest charge is selected.
     """
     Ntotalbonds = np.array(pt.GetValenceList(atom.GetAtomicNum()))
@@ -121,53 +145,40 @@ def get_atom_charge(atom, ignore_multiple_charges=True, use_formal_charge=False)
     return min_charge
 
 
-def assess_atoms(mol, add_atom=None, use_formal_charge=False):
-    """Assess an RDKit molecule's atoms to determine which are charged or not fully satisfied.
+def assess_atoms(
+    mol: Mol,
+    add_atom: str | None = None,
+    use_formal_charge: bool = False,
+) -> tuple[int | float, int, dict[int, ChargedAtomInfo]]:
+    """Assess atom-wise charge state and unsatisfied valence indicators.
 
     Parameters
     ----------
-    mol : rdkit.Chem.Mol
+    mol : rdkit.Chem.rdchem.Mol
         RDKit molecule.
-    add_atom : str, optional
+    add_atom : str or None, default=None
         If provided, the number of hanging bonds will be the number of this atom type present.
-    use_formal_charge : bool, optional
+    use_formal_charge : bool, default=False
         Whether to use the atomic formal charge in :func:`get_atom_charge`.
 
     Returns
     -------
-    charge : float
+    charge : int or float
         Total charge of the molecule.
     hanging_bonds : int
         Number of hanging bonds to contribute toward the oxidation state of the metal.
-    charged_atoms : dict
-        Detailed information on atoms showing a charge or not satisfied with full bonding.
+    charged_atoms : dict of int to ChargedAtomInfo
+        Per-atom diagnostics for non-zero charge sites.
 
-        Each entry contains:
-            symbol : str
-                Atomic symbol.
-            charge : int
-                Formal charge of the atom as defined by :func:`get_atom_charge`.
-            bond_orders : list of tuple
-                List of bonds to this atom. Each bond is represented by a tuple:
-                    bond_type : str
-                        rdkit.Chem.BondType.name
-                    bond_order : int
-                        Custom integer value representing the bond type (DATIVE=0).
-                    BeginAtom_Symbol : str
-                        Atomic symbol of the "BeginAtom".
-                    BeginAtomIdx : int
-                        Molecule index of the "BeginAtom".
-                    EndAtom_Symbol : str
-                        Atomic symbol of the "EndAtom".
-                    EndAtomIdx : int
-                        Molecule index of the "EndAtom".
+        Each value includes atom symbol, assigned charge, and local bond-order
+        tuples for debugging/reporting.
     """
     if mol is None:
         raise ValueError("Molecule is None")
 
     mol = copy.deepcopy(mol)
 
-    charged_atoms = {}
+    charged_atoms: dict[int, ChargedAtomInfo] = {}
     total_charge = 0
     hanging_bonds = 0
 
@@ -181,7 +192,7 @@ def assess_atoms(mol, add_atom=None, use_formal_charge=False):
             mol.RemoveAtom(idx)
 
     for a in mol.GetAtoms():
-        charge = get_atom_charge(a)
+        charge = get_atom_charge(a, use_formal_charge=use_formal_charge)
         if charge != 0:
             total_charge += charge
             charged_atoms[a.GetIdx()] = {
@@ -212,7 +223,7 @@ def assess_atoms(mol, add_atom=None, use_formal_charge=False):
     return total_charge, int(hanging_bonds), charged_atoms
 
 
-def update_formal_charges(mol):
+def update_formal_charges(mol: Mol) -> None:
     """Update the formal charges of a molecule to align with their implied charge from connectivity.
 
     Note that formal charges of metals are not updated.
@@ -220,7 +231,11 @@ def update_formal_charges(mol):
     Parameters
     ----------
     mol : rdkit.Chem.Mol
-        RDKit molecule to update in place
+        RDKit molecule to update in place.
+
+    Returns
+    -------
+    None
     """
     for atm in mol.GetAtoms():
         if atm.GetAtomicNum() in METALS_NUM:
@@ -235,8 +250,15 @@ def update_formal_charges(mol):
             atm.SetFormalCharge(int(get_atom_charge(atm)))
 
 
-def copy_atom_coords(mol1, index1, mol2, index2, confId1=0, confId2=0):
-    """Copy the coordinates of one atom to another
+def copy_atom_coords(
+    mol1: Mol,
+    index1: int,
+    mol2: Mol,
+    index2: int,
+    confId1: int = 0,
+    confId2: int = 0,
+) -> None:
+    """Copy atom coordinates between molecules.
 
     Parameters
     ----------
@@ -248,8 +270,14 @@ def copy_atom_coords(mol1, index1, mol2, index2, confId1=0, confId2=0):
         RDKit reference molecule
     index2 : int
         Index of reference atom
-    confId : int, optional, default=0
-        Conformer index
+    confId1 : int, default=0
+        Target conformer index in ``mol1``.
+    confId2 : int, default=0
+        Reference conformer index in ``mol2``.
+
+    Returns
+    -------
+    None
     """
     conf1 = mol1.GetConformer(confId1)
     conf2 = mol2.GetConformer(confId2)
@@ -263,23 +291,33 @@ def copy_atom_coords(mol1, index1, mol2, index2, confId1=0, confId2=0):
 #############################################################################
 
 
-def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_tolerance=0.2):
-    """
-    Convert a QCElemental molecule to an RDKit molecule.
+def qcelemental_to_rdkit(
+    qcel_molecule: QCEleMoleculeLike,
+    use_connectivity: bool = True,
+    distance_tolerance: float = 0.2,
+) -> Mol:
+    """Convert a QCElemental molecule to an RDKit molecule.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     qcel_molecule : qcelemental.models.Molecule
-        The QCElemental molecule object
-    use_connectivity : bool
-        Whether to use existing connectivity information if available
-    distance_tolerance : float, optional, default=0.1
-        Additional tolerance for bond distance cutoffs (Angstroms) in :func:`determine_connectivity`
+        QCElemental molecule object.
+    use_connectivity : bool, default=True
+        Whether to use provided connectivity when available.
+    distance_tolerance : float, default=0.2
+        Additional tolerance (Å) for bond distance cutoffs in
+        :func:`determine_connectivity`.
 
-    Returns:
-    --------
+    Returns
+    -------
     rdkit.Chem.Mol
-        RDKit molecule object
+        RDKit molecule object.
+
+    Examples
+    --------
+    >>> # mol = qcelemental_to_rdkit(qcel_molecule)
+    >>> # isinstance(mol, Mol)
+    >>> # True
     """
 
     mol = Chem.RWMol()
@@ -328,32 +366,43 @@ def qcelemental_to_rdkit(qcel_molecule, use_connectivity=True, distance_toleranc
 
 
 def xyz_to_rdkit(
-    symbols, positions, distance_tolerance=0.35, method="openbabel", ignore_scale=False
-):
-    """
-    Convert a QCElemental molecule to an RDKit molecule.
+    symbols: list[str],
+    positions: np.ndarray,
+    distance_tolerance: float = 0.35,
+    method: str = "openbabel",
+    ignore_scale: bool = False,
+) -> Mol:
+    """Build an RDKit molecule from symbols and Cartesian coordinates.
 
     If the resulting molecule cannot be sanitized, all bond orders will be single. For more
     in depth sanitization of bond order assignment, run the molecule through ``determine_bonds``.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     symbols : list[str]
-        List of element symbols
+        Element symbols.
     positions : numpy.ndarray
-        Matrix of the same length as ``symbols`` with x, y, and z coordinates in Angstroms
-    distance_tolerance : float, optional, default=0.1
-        Additional tolerance for bond distance cutoffs (Angstroms) in :func:`determine_connectivity`
-    ignore_scale : bool, optional, default=False
+        Matrix matching ``symbols`` with x, y, z coordinates in Å.
+    distance_tolerance : float, default=0.35
+        Additional tolerance (Å) for bond cutoffs in :func:`determine_connectivity`.
+    method : str, default="openbabel"
+        Connectivity method passed to :func:`determine_connectivity`.
+    ignore_scale : bool, default=False
         If True avoid an error when "H" is present and the minimum atomic distance is not between
         0.8 Å and 1.5 Å.
-    method : str, optional, default="hybrid"
-        Method to determine connectivity in :func:`determine_connectivity`
 
-    Returns:
-    --------
+    Returns
+    -------
     rdkit.Chem.Mol
-        RDKit molecule object
+        RDKit molecule object.
+
+    Examples
+    --------
+    >>> symbols = ["O", "H", "H"]
+    >>> positions = np.array([[0.0, 0.0, 0.0], [0.95, 0.0, 0.0], [-0.3, 0.9, 0.0]])
+    >>> mol = xyz_to_rdkit(symbols, positions, ignore_scale=True)
+    >>> mol.GetNumAtoms()
+    3
     """
     positions = np.array(positions)
     if len(symbols) != len(positions):
@@ -410,27 +459,40 @@ def xyz_to_rdkit(
 
 
 def determine_connectivity(
-    rdkit_mol, method="rdkit", clean_up=True, distance_tolerance=0.2
-):
-    """
-    Determine connectivity for molecules, particularly transition metal organometallic complexes.
+    rdkit_mol: Mol,
+    method: str = "rdkit",
+    clean_up: bool = True,
+    distance_tolerance: float = 0.2,
+) -> Mol:
+    """Determine molecular connectivity, with optional metal-focused cleanup.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     rdkit_mol : rdkit.Chem.Mol
-        RDKit molecule without bonds
-    method : str, optional, default='hybrid'
-        Method to use: 'rdkit', 'openbabel', or "None".
-    clean_up : bool, optional, default=True
+        RDKit molecule without bonds.
+    method : str, default="rdkit"
+        Method to use: ``"rdkit"``, ``"openbabel"``, or ``"None"``.
+    clean_up : bool, default=True
         Optionally use special rules to determine bonds. Recommended for transition metals.
         If ``method == None``, this is always ``False``.
-    distance_tolerance : float, optional, default=0.1
-        Additional tolerance for bond distance cutoffs (Angstroms)
+    distance_tolerance : float, default=0.2
+        Additional tolerance for bond distance cutoffs (Å).
 
-    Returns:
-    --------
+    Returns
+    -------
     rdkit.Chem.Mol
-        RDKit molecule with bonds added
+        RDKit molecule with bonds added.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is unsupported.
+
+    Examples
+    --------
+    >>> # connected = determine_connectivity(mol, method="rdkit")
+    >>> # connected.GetNumBonds() >= 0
+    >>> # True
     """
     if method == "openbabel":
         mol = _determine_connectivity_openbabel(rdkit_mol)
@@ -451,8 +513,19 @@ def determine_connectivity(
         return mol
 
 
-def _determine_connectivity_openbabel(rdkit_mol):
-    """Use OpenBabel to determine connectivity."""
+def _determine_connectivity_openbabel(rdkit_mol: Mol) -> Mol:
+    """Use OpenBabel to assign atom connectivity.
+
+    Parameters
+    ----------
+    rdkit_mol : rdkit.Chem.Mol
+        Molecule without bonds.
+
+    Returns
+    -------
+    rdkit.Chem.Mol
+        Molecule with inferred connectivity.
+    """
 
     ob_mol = ob.OBMol()
     ob_conv = ob.OBConversion()
@@ -467,8 +540,21 @@ def _determine_connectivity_openbabel(rdkit_mol):
     return mol_with_bonds
 
 
-def _get_covalent_radius(symbol, fallback_radius=1.5):
-    """Get covalent radius for an element symbol using periodictable."""
+def _get_covalent_radius(symbol: str, fallback_radius: float = 1.5) -> float:
+    """Return covalent radius for an element symbol.
+
+    Parameters
+    ----------
+    symbol : str
+        Element symbol.
+    fallback_radius : float, default=1.5
+        Radius used when lookup fails.
+
+    Returns
+    -------
+    float
+        Covalent radius in Å.
+    """
     try:
         element = getattr(periodictable, symbol)
         # periodictable stores covalent radius in pm, convert to Angstroms
@@ -482,43 +568,56 @@ def _get_covalent_radius(symbol, fallback_radius=1.5):
         return fallback_radius
 
 
-def _is_transition_metal(symbol):
-    """Check if an element is a transition metal using periodictable."""
+def _is_transition_metal(symbol: str) -> bool:
+    """Check whether an element is treated as a transition metal.
+
+    Parameters
+    ----------
+    symbol : str
+        Element symbol.
+
+    Returns
+    -------
+    bool
+        ``True`` when symbol is in transition-metal radius table.
+    """
 
     return symbol in transition_metal_covalent_radii
 
 
-def _correct_sulfonate_phosphate_interaction(mol, distances, r_cut=3.0, dist_frac=0.05):
-    """Identify atoms that should not bond to metal centers.
+def _correct_sulfonate_phosphate_interaction(
+    mol: Mol,
+    distances: np.ndarray,
+    r_cut: float = 3.0,
+    dist_frac: float = 0.05,
+) -> list[int]:
+    """Return candidate atom indices to block from metal bonding.
 
-    Finds indices of atoms that should not be bonded to the metal center either because:
-    1. They are Hydrogen atoms already bonded to something
-    2. They are atoms in central_sym (S, P, C, H) connected to electronegative atoms (O, N)
-       that are significantly closer to the metal (more than dist_frac closer)
+    The heuristic blocks atoms when neighboring electronegative atoms are
+    substantially closer to the metal center.
 
     Parameters
     ----------
     mol : rdkit.Chem.Mol
-        RDKit molecule
+        Molecule to evaluate.
     distances : numpy.ndarray
-        Distance matrix between all atoms
-    r_cut : float, optional, default=3.0
-        Distance cutoff (in Å) for considering atoms near metals
-    dist_frac : float, optional, default=0.05
-        Fractional distance threshold. If connected electronegative atoms are closer to the metal
-        by more than this fraction, the central atom should not bond to the metal.
+        Pairwise distance matrix.
+    r_cut : float, default=3.0
+        Distance cutoff (Å) for local metal-neighbor consideration.
+    dist_frac : float, default=0.05
+        Relative closeness threshold for blocking a candidate atom.
 
     Returns
     -------
-    block_bond_idx : list
-        Atom indices that should not bond to metals
+    list of int
+        Atom indices that should not bond to the metal center.
     """
 
     metal_indices = [
         a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
     ]
-    electronegative_sym = ["O", "N", "C"]
-    central_sym = [
+    electronegative_sym: list[str] = ["O", "N", "C"]
+    central_sym: list[str] = [
         "S",
         "P",
         "C",
@@ -574,37 +673,31 @@ def _correct_sulfonate_phosphate_interaction(mol, distances, r_cut=3.0, dist_fra
     return block_bond_idx
 
 
-def _determine_connectivity_rdkit(mol):
-    """
-    Determine molecular connectivity using RDKit DetermineConnectivity.
-
-    This function analyzes the 3D coordinates of atoms in an RDKit molecule and adds bonds between atoms
-    based on vdW radii.
+def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> Mol:
+    """Assign connectivity using RDKit native coordinate perception.
 
     Parameters
     ----------
     mol : rdkit.Chem.Mol
-        The input RDKit molecule, which must have at least one conformer with 3D coordinates.
+        Input RDKit molecule.
+    distance_tolerance : float, default=0.2
+        Present for interface consistency; currently unused by RDKit backend.
 
     Returns
     -------
     rdkit.Chem.Mol
-        A new RDKit molecule object with bonds added according to the connectivity rules.
-
-    Raises
-    ------
-    ValueError
-        If the input molecule does not have any conformers.
+        Molecule with inferred connectivity.
     """
     Chem.rdDetermineBonds.DetermineConnectivity(mol)
     return mol
 
 
 def _determine_connectivity_clean_up(
-    rdkit_mol, max_distance_tolerance=0.2, min_distance_tolerance=0.4
-):
-    """
-    Determine molecular connectivity using RDKit with custom logic for metal atoms.
+    rdkit_mol: Mol,
+    max_distance_tolerance: float = 0.2,
+    min_distance_tolerance: float = 0.4,
+) -> Mol:
+    """Determine connectivity using covalent-radius distance heuristics.
 
     This function analyzes the 3D coordinates of atoms in an RDKit molecule and adds bonds between atoms
     based on covalent radii and distance thresholds. It applies special rules for transition metals by
@@ -614,11 +707,10 @@ def _determine_connectivity_clean_up(
     ----------
     rdkit_mol : rdkit.Chem.Mol
         The input RDKit molecule, which must have at least one conformer with 3D coordinates.
-    max_distance_tolerance : float, optional
-        The maximum additional distance (in angstroms) allowed beyond the sum of covalent radii for bond formation.
-        Default is 0.2.
-    min_distance_tolerance : float, optional
-        The minimum distance (in angstroms) below which atoms are considered too close to form a bond. Default is 0.4.
+    max_distance_tolerance : float, default=0.2
+        Maximum extra distance (Å) above radius sum for bond formation.
+    min_distance_tolerance : float, default=0.4
+        Minimum distance (Å) below which atoms are considered too close.
 
     Returns
     -------
@@ -655,10 +747,10 @@ def _determine_connectivity_clean_up(
 
     for i in range(mol.GetNumAtoms()):
         for j in range(i + 1, mol.GetNumAtoms()):
-            one_is_tm = _is_transition_metal(symbols[i]) or _is_transition_metal(
+            one_is_tm: bool = _is_transition_metal(symbols[i]) or _is_transition_metal(
                 symbols[j]
             )
-            factor = 2 if one_is_tm else 1
+            factor: int = 2 if one_is_tm else 1
             max_bond_threshold = radii[i] + radii[j] + max_distance_tolerance * factor
             min_bond_threshold = radii[i] + radii[j] - min_distance_tolerance * factor
 
@@ -677,7 +769,7 @@ def _determine_connectivity_clean_up(
     return mol.GetMol()
 
 
-def update_atom_bond_props(mol_to_change, mol_reference):
+def update_atom_bond_props(mol_to_change: Mol, mol_reference: Mol) -> Mol:
     """Update atom and bond properties of one molecule to match another.
 
     Molecules must either be identical in their atomic composition and connectivity, or the reference may be
@@ -689,9 +781,14 @@ def update_atom_bond_props(mol_to_change, mol_reference):
     Parameters
     ----------
     mol_to_change : rdkit.Chem.Mol
-        RDKit molecule that needs to be updated
+        RDKit molecule that needs to be updated.
     mol_reference : rdkit.Chem.Mol
-        RDKit molecule for reference to update the target molecule
+        RDKit molecule used as property reference.
+
+    Returns
+    -------
+    rdkit.Chem.Mol
+        Updated target molecule.
 
     Raises
     ------
@@ -699,11 +796,11 @@ def update_atom_bond_props(mol_to_change, mol_reference):
         If the chemical formulas of the provided molecules indicate that they cannot be mapped.
     """
 
-    formula_to_change = get_molecular_formula(mol_to_change)
-    formula_to_change_no_H = get_molecular_formula(
+    formula_to_change: str = get_molecular_formula(mol_to_change)
+    formula_to_change_no_H: str = get_molecular_formula(
         mol_to_change, make_hydrogens_implicit=True
     )
-    formula_reference = get_molecular_formula(mol_reference)
+    formula_reference: str = get_molecular_formula(mol_reference)
     if formula_to_change == formula_reference:
         atom_mapping = find_atom_mapping(mol_to_change, mol_reference)
     elif formula_to_change_no_H == formula_reference:

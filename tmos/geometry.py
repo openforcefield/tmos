@@ -2,6 +2,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Geometry import Point3D
 from loguru import logger
+from typing import TypeAlias
 
 from pymatgen.symmetry.analyzer import PointGroupAnalyzer
 from pymatgen.core.structure import Molecule
@@ -15,8 +16,85 @@ from .reference_values import (
     steinhardt_order_parameters,
 )
 
+GeometryResult: TypeAlias = tuple[str, int]
+GeometryFromMolResult: TypeAlias = tuple[str, int, Chem.rdchem.Mol]
 
-def get_coordinates(mol, index):
+
+def _to_float(value: object, default: float) -> float:
+    """Convert one value to ``float`` with fallback.
+
+    Parameters
+    ----------
+    value : object
+        Candidate value.
+    default : float
+        Fallback value when conversion fails.
+
+    Returns
+    -------
+    float
+        Converted value or ``default``.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _to_int(value: object, default: int) -> int:
+    """Convert one value to ``int`` with fallback.
+
+    Parameters
+    ----------
+    value : object
+        Candidate value.
+    default : int
+        Fallback value when conversion fails.
+
+    Returns
+    -------
+    int
+        Converted value or ``default``.
+    """
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _to_str(value: object, default: str) -> str:
+    """Convert one value to ``str`` with fallback.
+
+    Parameters
+    ----------
+    value : object
+        Candidate value.
+    default : str
+        Fallback value when conversion fails.
+
+    Returns
+    -------
+    str
+        Converted value or ``default``.
+    """
+    if isinstance(value, str):
+        return value
+    return default
+
+
+def get_coordinates(mol: Chem.rdchem.Mol, index: int) -> np.ndarray:
     """Get the 3D coordinates of an atom from an RDKit molecule.
 
     Parameters
@@ -36,9 +114,8 @@ def get_coordinates(mol, index):
     return np.array([atm.x, atm.y, atm.z])
 
 
-def get_distance(mol, ind1, ind2):
-    """
-    Get the distance between two atoms.
+def get_distance(mol: Chem.rdchem.Mol, ind1: int, ind2: int) -> float:
+    """Get the distance between two atoms.
 
     Parameters
     ----------
@@ -55,41 +132,47 @@ def get_distance(mol, ind1, ind2):
         Distance between atoms.
     """
 
-    return np.linalg.norm(get_coordinates(mol, ind1) - get_coordinates(mol, ind2))
+    return float(
+        np.linalg.norm(get_coordinates(mol, ind1) - get_coordinates(mol, ind2))
+    )
 
 
 def get_geometry_from_xyz(
-    positions, central_idx, r_cut=2.5, tol=15, ignore_scale=False
-):
-    """Determine the bonded geometry of a central atom based on atomic positions from xyz coordinates.
+    positions: np.ndarray,
+    central_idx: int,
+    r_cut: float = 2.5,
+    tol: float = 15,
+    ignore_scale: bool = False,
+) -> GeometryResult:
+    """Assign local coordination geometry from Cartesian coordinates.
 
     Parameters
     ----------
     positions : numpy.ndarray
-        Array of atomic positions with shape (N, 3).
+        Atomic positions with shape ``(N, 3)`` in Å.
     central_idx : int
         Index of the central atom in the positions array.
-    r_cut : float, optional
-        Distance cutoff (in Å) to filter neighboring atoms. Defaults to 2.5.
-    tol : float, optional
-        Tolerance for angle comparison in degrees. Defaults to 15.
-    ignore_scale : bool, optional
+    r_cut : float, default=2.5
+        Distance cutoff (in Å) to filter neighboring atoms.
+    tol : float, default=15
+        Tolerance for angle comparison in degrees.
+    ignore_scale : bool, default=False
         If True, ignores the warning when the minimum bond is not between 0.8 and 1.5 Å.
 
     Returns
     -------
-    str or tuple
-        The determined geometry of the central atom as a string, or a tuple (geometry, n) where n is the number of neighbors.
-        Returns an empty string if undetermined.
+    tuple of (str, int)
+        ``(geometry_label, n_neighbors)``.
 
     Raises
     ------
     ValueError
-        If the minimum bond distance is outside the expected range and `ignore_scale` is False.
+        If the shortest bond-like distance is outside expected Å scale and
+        ``ignore_scale`` is ``False``.
 
     Notes
     -----
-    This function uses heuristics based on pairwise angles between neighboring atoms to classify the geometry.
+    Uses pairwise-angle heuristics against ideal-angle templates.
     """
 
     central_pos = positions[central_idx]
@@ -105,7 +188,7 @@ def get_geometry_from_xyz(
     positions = np.array(positions[np.where(np.logical_and(dist < r_cut, dist > 0))[0]])
     positions -= np.array(central_pos)
 
-    n = len(positions)
+    n: int = len(positions)
     if n == 1:
         return "Monocoordinate", n
     elif n == 0:
@@ -127,7 +210,7 @@ def get_geometry_from_xyz(
             )
             angles.append(angle)
     angles = np.sort(np.array(angles))
-    avg_angle = np.mean(angles)
+    avg_angle = float(np.mean(angles))
 
     # Heuristic classification
     if n == 2:
@@ -139,10 +222,10 @@ def get_geometry_from_xyz(
         return "Ferrocene", n
     else:
         scores = {
-            key: np.mean(np.abs(angles - value))
+            key: float(np.mean(np.abs(angles - value)))
             for key, value in ideal_angles[n].items()
         }
-        geometry = min(scores, key=scores.get)
+        geometry = min(scores, key=lambda key: scores[key])
         logger.debug(f"Geometry scores: {scores}")
         if scores[geometry] > tol:
             logger.info(
@@ -153,25 +236,19 @@ def get_geometry_from_xyz(
             return geometry, n
 
 
-def get_neighbor_angles(positions):
-    """
-    Calculate the angles between all pairs of vectors in a given list of positions.
+def get_neighbor_angles(positions: np.ndarray) -> np.ndarray:
+    """Calculate all pairwise neighbor angles.
 
     Parameters
     ----------
-    positions : list of array-like
-        A list of vectors (e.g., 2D or 3D coordinates) represented as array-like objects.
+    positions : numpy.ndarray
+        Array of neighbor vectors with shape ``(N, 3)``.
 
     Returns
     -------
     numpy.ndarray
-        A sorted array of angles (in degrees) between all unique pairs of vectors in the input list.
+        Sorted pairwise angles (degrees) for all unique vector pairs.
 
-    Notes
-    -----
-    The angles are calculated using the dot product and the arccosine function, ensuring that
-    the result is within the range [0, 180] degrees. The resulting angles are sorted in ascending
-    order before being returned.
     """
     angles = []
     for i in range(len(positions)):
@@ -191,32 +268,33 @@ def get_neighbor_angles(positions):
     return angles
 
 
-def get_angle_similarity(angles1, angles2, metric="rmsd", max_angle=90):
-    """Calculate the similarity between two sets of angles using a specified metric.
+def get_angle_similarity(
+    angles1: np.ndarray,
+    angles2: np.ndarray,
+    metric: str = "rmsd",
+    max_angle: float = 90,
+) -> float:
+    """Compute similarity between two angle sets.
 
     Parameters
     ----------
-    angles1 : array-like
-        First array of angles (in degrees).
-    angles2 : array-like
-        Second array of angles (in degrees). Must have the same length as `angles1`.
-    metric : str, optional
+    angles1 : numpy.ndarray
+        First angle vector in degrees.
+    angles2 : numpy.ndarray
+        Second angle vector in degrees. Must match ``angles1`` length.
+    metric : str, default="rmsd"
         Similarity metric to use. Options are:
 
         - "gaussian kernel": Computes similarity using a Gaussian kernel based on squared differences.
         - "rmsd": Computes similarity as 1 minus the root-mean-square deviation normalized by `max_angle`.
 
-        Defaults to "gaussian kernel".
-    max_angle : float, optional
+    max_angle : float, default=90
         Maximum angle value (in degrees) used for normalization in the similarity calculation.
-        Defaults to 90.
 
     Returns
     -------
     float
-        Similarity score between the two angle sets. Higher values indicate greater similarity.
-        For "gaussian kernel", the value ranges from 0 (completely dissimilar) to 1 (identical).
-        For "rmsd", the value also ranges from 0 to 1.
+        Similarity score where larger values indicate closer agreement.
 
     Raises
     ------
@@ -225,8 +303,8 @@ def get_angle_similarity(angles1, angles2, metric="rmsd", max_angle=90):
 
     Notes
     -----
-    Both input angle arrays are sorted before comparison to ensure consistent similarity evaluation
-    regardless of the order of angles in the input arrays.
+    Inputs are sorted before scoring, so permutation order does not affect the
+    result.
     """
     angles1, angles2 = np.sort(angles1), np.sort(angles2)
     if metric == "gaussian kernel":
@@ -241,64 +319,64 @@ def get_angle_similarity(angles1, angles2, metric="rmsd", max_angle=90):
     return similarity
 
 
-def root_mean_squared_similarity(vec1, vec2, scale_factor=1):
-    """Calculate the root-mean-squared similarity between two vectors.
+def root_mean_squared_similarity(
+    vec1: np.ndarray,
+    vec2: np.ndarray,
+    scale_factor: float = 1,
+) -> float:
+    """Return normalized RMS similarity between two vectors.
 
     Parameters
     ----------
-    vec1 : array-like
-        First vector or array of values.
-    vec2 : array-like
-        Second vector or array of values. Must have the same length as `vec1`.
-    scale_factor : float, optional
+    vec1 : numpy.ndarray
+        First vector.
+    vec2 : numpy.ndarray
+        Second vector. Must have the same length as ``vec1``.
+    scale_factor : float, default=1
         Scaling factor used to normalize the root-mean-square deviation.
         Defaults to 1.
 
     Returns
     -------
     float
-        Similarity score between the two vectors, calculated as 1 minus the normalized
-        root-mean-square deviation. Values range from 0 (completely dissimilar) to 1 (identical).
-        When vectors are identical, the similarity is 1. As the RMS deviation increases,
-        the similarity approaches 0.
+        Similarity score ``1 - RMSD/scale_factor``.
 
     Notes
     -----
-    The similarity is computed as:
-
-    .. math::
-        \\text{similarity} = 1 - \\frac{\\sqrt{\\text{mean}((\\text{vec1} - \\text{vec2})^2)}}{\\text{scale_factor}}
-
-    The `scale_factor` parameter is used to normalize the RMS deviation to a [0, 1] range.
-    Typically, `scale_factor` should be set to the maximum expected deviation between vectors.
+    Choose ``scale_factor`` to set the expected deviation scale.
     """
     return 1 - np.sqrt(np.mean(np.square(vec1 - vec2))) / scale_factor
 
 
-def orientation_tensor_eigs(coords, central_idx):
-    """
-    Compute the eigenvalues and shape metrics of the orientation tensor
-    for a set of neighbor atoms around a metal center.
+def orientation_tensor_eigs(
+    coords: np.ndarray,
+    central_idx: int,
+) -> tuple[np.ndarray, float, float, np.ndarray]:
+    """Compute orientation-tensor eigenmetrics for one coordination shell.
 
     Parameters
     ----------
-    coords : (N+1, 3) array-like
-        Atomic coordinates. The first row is the metal center,
-        and the remaining rows are the bonded neighbor atoms.
+    coords : numpy.ndarray
+        Coordinates with shape ``(N+1, 3)``.
     central_idx : int
         The index of the center of geometry that should be used as a reference
         for forming vectors.
 
     Returns
     -------
-    eigs : (3,) ndarray
-        Eigenvalues of the orientation tensor, sorted descending (λ1 ≥ λ2 ≥ λ3).
+    eigs : numpy.ndarray
+        Eigenvalues sorted descending.
     planarity : float
         λ1 - λ2, higher means more planar (two dominant axes).
     asphericity : float
         λ1 - 0.5*(λ2 + λ3), measures deviation from spherical symmetry.
-    tensor : (3,3) ndarray
-        The full orientation tensor (for optional diagnostics).
+    tensor : numpy.ndarray
+        Full orientation tensor.
+
+    Raises
+    ------
+    ValueError
+        If coordinate shape is invalid or a neighbor overlaps the center.
     """
     coords = np.asarray(coords, dtype=float)
     if coords.shape[0] < 2 or coords.shape[1] != 3:
@@ -322,24 +400,31 @@ def orientation_tensor_eigs(coords, central_idx):
     return eigs, planarity, asphericity, tensor
 
 
-def get_geometry_from_posym(rdmol, tol=1e-6, match_tol=50):
-    """
-    Analyze the point group geometry of a given RDKit molecule using posymm
+def get_geometry_from_posym(
+    rdmol: Chem.rdchem.Mol,
+    tol: float = 1e-6,
+    match_tol: float = 50,
+) -> str:
+    """Assign a Schoenflies point group using `posym` best-match scoring.
 
-    Args:
-        rdmol (rdkit.Chem.rdchem.Mol): The RDKit molecule to analyze.
-        tol (float, optional): If the percent match of different geometries is within this tolerance, they will be
-        considered equal. Defaults to 1e-6.
-        match_tol (float, optional): A percent measure of a match must be below this value to be considered a match.
+    Parameters
+    ----------
+    rdmol : rdkit.Chem.rdchem.Mol
+        Molecule with 3D coordinates.
+    tol : float, default=1e-6
+        Numerical tolerance used to collect equivalent best matches.
+    match_tol : float, default=50
+        Reserved argument for API compatibility.
 
-    Returns:
-        point_group (str): The Schoenflies symbol of the point group.
-
+    Returns
+    -------
+    str
+        Selected Schoenflies point-group symbol.
     """
     coordinates = rdmol.GetConformers()[0].GetPositions()
     symbols = [a.GetSymbol() for a in rdmol.GetAtoms()]
 
-    sym_groups = list(geometry_point_group[len(symbols) - 1].keys())
+    sym_groups: list[str] = list(geometry_point_group[len(symbols) - 1].keys())
     measures = {
         sym: SymmetryMolecule(
             group=sym, coordinates=coordinates, symbols=symbols
@@ -349,45 +434,44 @@ def get_geometry_from_posym(rdmol, tol=1e-6, match_tol=50):
     min_value = min(measures.values())
 
     logger.debug(f"Point Group Measures: {measures}")
-    point_groups = [key for key, val in measures.items() if tol > val - min_value]
+    point_groups: list[str] = [
+        key for key, val in measures.items() if tol > val - min_value
+    ]
     if len(point_groups) == 1:
-        point_group = point_groups[0]
+        point_group: str = point_groups[0]
     elif len(symbols) - 1 == 3:
-        point_group = [x for x in ["C3v", "D3h", "C2v"] if x in point_groups][
+        point_group: str = [x for x in ["C3v", "D3h", "C2v"] if x in point_groups][
             0
         ]  # provides preference
     else:
-        point_group = point_groups[0]
+        point_group: str = point_groups[0]
 
     return point_group
 
 
 def get_geometry_from_pymatgen(
-    rdmol, tolerance=0.3, eigen_tolerance=0.2, matrix_tolerance=0.1
-):
-    """
-    Analyze the point group geometry of a given RDKit molecule.
+    rdmol: Chem.rdchem.Mol,
+    tolerance: float = 0.3,
+    eigen_tolerance: float = 0.2,
+    matrix_tolerance: float = 0.1,
+) -> str:
+    """Assign a Schoenflies point group using `pymatgen` symmetry analysis.
 
-    Args:
-        rdmol (rdkit.Chem.rdchem.Mol): The RDKit molecule to analyze.
-        tolerance (float, optional): Tolerance for point group analysis. Defaults to 0.3.
-        eigen_tolerance (float, optional): Controls the numerical tolerance used when checking the eigenvalues
-        of rotation matrices associated with symmetry operations.
-        A proper symmetry operation in 3D can be represented by a 3×3 rotation matrix R.
-        The eigenvalues of R encode the rotation angle (e.g., 1 for a 0° rotation, complex roots of unity for
-        2-, 3-, 4-, 6-fold rotations, etc.). For example:
+    Parameters
+    ----------
+    rdmol : rdkit.Chem.rdchem.Mol
+        Molecule with 3D coordinates.
+    tolerance : float, default=0.3
+        Geometric matching tolerance.
+    eigen_tolerance : float, default=0.2
+        Tolerance for symmetry-operation eigenvalue checks.
+    matrix_tolerance : float, default=0.1
+        Tolerance for rotation-matrix matching to ideal forms.
 
-        - 2-fold rotation → eigenvalues {1, -1, -1}
-        - 3-fold rotation → eigenvalues {1, exp(±2πi/3)}
-
-        Defaults to 0.2. PyMatGen default is 0.01.
-        matrix_tolerance (float, optional): Controls the tolerance for comparing rotation matrices to their
-        ideal integer forms. In perfect symmetry, rotation matrices should contain exact integers (like 0, ±1)
-        for Cartesian or lattice directions. In practice, small floating-point deviations occur (e.g., 0.00002
-        instead of 0, -0.99998 instead of -1). Defaults to 0.1.
-
-    Returns:
-        point_group (str): The Schoenflies symbol of the point group.
+    Returns
+    -------
+    str
+        Schoenflies point-group symbol.
     """
     pymatgen_mol = Molecule(
         species=[atom.GetSymbol() for atom in rdmol.GetAtoms()],
@@ -401,11 +485,11 @@ def get_geometry_from_pymatgen(
         eigen_tolerance=eigen_tolerance,
         matrix_tolerance=matrix_tolerance,
     )
-    point_group = pga.get_pointgroup().sch_symbol
+    point_group: str = pga.get_pointgroup().sch_symbol
     return point_group
 
 
-def rdmol_to_unit_coordinates(rdmol, central_idx):
+def rdmol_to_unit_coordinates(rdmol: Chem.rdchem.Mol, central_idx: int) -> np.ndarray:
     """Convert RDKit molecule coordinates to unit vectors centered on a specific atom.
 
     Parameters
@@ -440,20 +524,32 @@ def rdmol_to_unit_coordinates(rdmol, central_idx):
     return coords
 
 
-def get_geometry_from_rylm(rdmol, central_idx, metric="cosine"):
-    """
-    Analyze the point group geometry of a given RDKit molecule.
+def get_geometry_from_rylm(
+    rdmol: Chem.rdchem.Mol,
+    central_idx: int,
+    metric: str = "cosine",
+) -> str:
+    """Assign geometry label from rotational fingerprints (`rylm`).
 
-    All fingerprints in tmos are generated with include_n_coord=True, include_w=True, frequencies=[4, 6, 8, 10, 12]
+    Parameters
+    ----------
+    rdmol : rdkit.Chem.rdchem.Mol
+        Molecule with 3D coordinates.
+    central_idx : int
+        Index of the center atom.
+    metric : str, default="cosine"
+        Similarity metric accepted by :class:`rylm.rylm.Similarity`.
 
-    Args:
-        rdmol (rdkit.Chem.rdchem.Mol): The RDKit molecule to analyze. The first atom is expected
-        to be the center.
-        central_idx (int): Index of central atom
-        metric (str): Distance metric accepted by :class:`rylm.rylm.Similarity`
+    Returns
+    -------
+    str
+        Geometry label with highest fingerprint similarity score.
 
-    Returns:
-        geometry (str): The Schoenflies symbol of the point group.
+    Examples
+    --------
+    >>> # label = get_geometry_from_rylm(mol, central_idx=0)
+    >>> # isinstance(label, str)
+    >>> # True
     """
     coords = rdmol_to_unit_coordinates(rdmol, central_idx)
 
@@ -484,7 +580,7 @@ def get_geometry_from_rylm(rdmol, central_idx, metric="cosine"):
         logger.debug(f"    {geom}: {sim}")
 
     try:
-        geometry = max(similarity, key=similarity.get)
+        geometry = max(similarity, key=lambda key: similarity[key])
     except Exception as e:
         raise ValueError(f"A geometry returned None: {similarity}:\n{e}")
 
@@ -492,47 +588,71 @@ def get_geometry_from_rylm(rdmol, central_idx, metric="cosine"):
 
 
 def get_geometry_from_angles(
-    rdmol, central_idx=0, tol=0.5, kwargs_angles={}, kwargs_eig={}
-):
-    """
-    Determine the bonded geometry of a central atom based on atomic positions from an RDKit molecule.
+    rdmol: Chem.rdchem.Mol,
+    central_idx: int = 0,
+    tol: float = 0.5,
+    kwargs_angles: dict[str, object] | None = None,
+    kwargs_eig: dict[str, object] | None = None,
+) -> str:
+    """Determine geometry from angle and orientation similarity scores.
 
     Parameters
     ----------
     rdmol : rdkit.Chem.rdchem.Mol
         RDKit molecule object.
-    central_idx : int
+    central_idx : int, default=0
         Index of the central atom in the molecule.
-    tol : float, optional, default=0.75
+    tol : float, default=0.5
         Tolerance for angle comparison in degrees.
-    kwargs_angles : dict, optional, default={}
+    kwargs_angles : dict of str to object or None, default=None
         Keyword arguments for :func:`get_angle_similarity`.
-    kwargs_eig : dict, optional, default={}
+    kwargs_eig : dict of str to object or None, default=None
         Keyword arguments for :func:`root_mean_squared_similarity`.
 
     Returns
     -------
-    geometry_name : str
+    str
         The determined geometry of the central atom, or "Undetermined" if not within tolerance.
 
+    Notes
+    -----
+    Final scores average angle similarity and orientation-eigenvalue
+    similarity for each candidate geometry.
+
     """
+    kwargs_angles = {} if kwargs_angles is None else kwargs_angles
+    kwargs_eig = {} if kwargs_eig is None else kwargs_eig
+
+    metric = _to_str(kwargs_angles.get("metric", "rmsd"), "rmsd")
+    max_angle = _to_float(kwargs_angles.get("max_angle", 90), 90.0)
+    scale_factor = _to_float(kwargs_eig.get("scale_factor", 1), 1.0)
+
     coords = rdmol_to_unit_coordinates(rdmol, central_idx)
-    n = len(coords) - 1
+    n: int = len(coords) - 1
     angles = get_neighbor_angles(coords[1:])
     eigenvalues, _, _, _ = orientation_tensor_eigs(coords, central_idx=central_idx)
 
-    scores = {
+    scores: dict[str, list[float]] = {
         key: [
-            float(get_angle_similarity(angles, value, **kwargs_angles)),
+            float(
+                get_angle_similarity(
+                    angles,
+                    value,
+                    metric=metric,
+                    max_angle=max_angle,
+                )
+            ),
             float(
                 root_mean_squared_similarity(
-                    eigenvalues, coordinate_eigenvalues[n][key], **kwargs_eig
+                    eigenvalues,
+                    coordinate_eigenvalues[n][key],
+                    scale_factor=scale_factor,
                 )
             ),
         ]
         for key, value in ideal_angles[n].items()
     }
-    geometry = max(scores, key=lambda k: np.mean(scores[k]))
+    geometry: str = max(scores, key=lambda k: np.mean(scores[k]))
 
     logger.debug(angles)
     logger.debug(scores)
@@ -545,7 +665,11 @@ def get_geometry_from_angles(
     return geometry
 
 
-def isolate_geometry_atoms(rdmol, central_idx, normalize=True):
+def isolate_geometry_atoms(
+    rdmol: Chem.rdchem.Mol,
+    central_idx: int,
+    normalize: bool = True,
+) -> Chem.rdchem.Mol:
     """Extract central atom and its neighbors as a new molecule with normalized geometry.
 
     The central atom is placed at the origin [0, 0, 0] and neighbor positions are
@@ -559,9 +683,8 @@ def isolate_geometry_atoms(rdmol, central_idx, normalize=True):
         RDKit molecule object with a conformer.
     central_idx : int
         Index of the central atom in the molecule.
-    normalize : bool, optional
-        If ``True`` the bond lengths are scaled to unit vectors. This will allow
-        Default is True.
+    normalize : bool, default=True
+        If ``True``, scale neighbor vectors to unit length.
 
     Returns
     -------
@@ -574,6 +697,7 @@ def isolate_geometry_atoms(rdmol, central_idx, normalize=True):
     ]
 
     editable_mol = Chem.EditableMol(Chem.Mol())
+    new_tmc = 0
     for idx in atoms_to_keep:
         atom = rdmol.GetAtomWithIdx(idx)
         atom.SetIsAromatic(False)
@@ -607,9 +731,13 @@ def isolate_geometry_atoms(rdmol, central_idx, normalize=True):
     return rdmol
 
 
-def get_geometry_from_mol(rdmol, central_idx, mode="angles", kwargs_mode={}):
-    """
-    Determine the bonded geometry of a central atom based on atomic positions from an RDKit molecule.
+def get_geometry_from_mol(
+    rdmol: Chem.rdchem.Mol,
+    central_idx: int,
+    mode: str = "angles",
+    kwargs_mode: dict[str, object] | None = None,
+) -> GeometryFromMolResult:
+    """Determine bonded geometry of a central atom from an RDKit molecule.
 
     Parameters
     ----------
@@ -617,18 +745,16 @@ def get_geometry_from_mol(rdmol, central_idx, mode="angles", kwargs_mode={}):
         RDKit molecule object.
     central_idx : int
         Index of the central atom in the molecule.
-    mode : str, optional
-        Mode used to calculate the point group. Default is 'angles'.
+    mode : str, default="angles"
+        Mode used to calculate the geometry label.
 
         - "posym": :func:`get_geometry_from_posym`
         - "pymatgen": :func:`get_geometry_from_pymatgen`
         - "rylm": :func:`get_geometry_from_rylm`
         - "angles": :func:`get_geometry_from_angles`
 
-    kwargs_mode : dict, optional, default={}
+    kwargs_mode : dict of str to object or None, default=None
         Keyword arguments for the chosen calculation mode.
-    tol : float, optional, default=0.8
-        Tolerance for angle comparison in degrees.
 
     Returns
     -------
@@ -638,7 +764,20 @@ def get_geometry_from_mol(rdmol, central_idx, mode="angles", kwargs_mode={}):
         Number of neighboring atoms.
     rdmol : rdkit.Chem.rdchem.Mol
         The modified RDKit molecule with updated conformer.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is unsupported or invalid keywords are provided for the chosen mode.
+
+    Examples
+    --------
+    >>> # geometry, n, local = get_geometry_from_mol(mol, central_idx=0, mode="angles")
+    >>> # n >= 0
+    >>> # True
     """
+    kwargs_mode = {} if kwargs_mode is None else kwargs_mode
+
     atoms_to_keep = [central_idx] + [
         atom.GetIdx() for atom in rdmol.GetAtomWithIdx(central_idx).GetNeighbors()
     ]
@@ -651,31 +790,61 @@ def get_geometry_from_mol(rdmol, central_idx, mode="angles", kwargs_mode={}):
         return "Element", n, rdmol
 
     if mode == "pymatgen":
-        keywords = ["tolerance", "eigen_tolerance", "matrix_tolerance"]
+        keywords: list[str] = ["tolerance", "eigen_tolerance", "matrix_tolerance"]
         if not all(x in keywords for x, _ in kwargs_mode.items()):
             raise ValueError(
                 f"For calculation mode 'posym', the keywords are: {', '.join(keywords)}"
             )
-        point_group = get_geometry_from_pymatgen(rdmol, **kwargs_mode)
+        tolerance = _to_float(kwargs_mode.get("tolerance", 0.3), 0.3)
+        eigen_tolerance = _to_float(kwargs_mode.get("eigen_tolerance", 0.2), 0.2)
+        matrix_tolerance = _to_float(kwargs_mode.get("matrix_tolerance", 0.1), 0.1)
+        point_group: str = get_geometry_from_pymatgen(
+            rdmol,
+            tolerance=tolerance,
+            eigen_tolerance=eigen_tolerance,
+            matrix_tolerance=matrix_tolerance,
+        )
         geometry = geometry_point_group[len(atoms_to_keep) - 1].get(point_group, None)
     elif mode == "posym":
-        keywords = ["tol", "match_tol"]
+        keywords: list[str] = ["tol", "match_tol"]
         if not all(x in keywords for x, _ in kwargs_mode.items()):
             raise ValueError(
                 f"For calculation mode 'posym', the keywords are: {', '.join(keywords)}"
             )
-        point_group = get_geometry_from_posym(rdmol, **kwargs_mode)
+        posym_tol = _to_float(kwargs_mode.get("tol", 1e-6), 1e-6)
+        match_tol = _to_float(kwargs_mode.get("match_tol", 50), 50.0)
+        point_group: str = get_geometry_from_posym(
+            rdmol,
+            tol=posym_tol,
+            match_tol=match_tol,
+        )
         geometry = geometry_point_group[len(atoms_to_keep) - 1].get(point_group, None)
     elif mode == "rylm":
-        keywords = ["metric"]
+        keywords: list[str] = ["metric"]
         if not all(x in keywords for x, _ in kwargs_mode.items()):
             raise ValueError(
                 f"For calculation mode 'rylm', the keywords are: {', '.join(keywords)}"
             )
-        geometry = get_geometry_from_rylm(rdmol, 0, **kwargs_mode)
+        metric = _to_str(kwargs_mode.get("metric", "cosine"), "cosine")
+        geometry = get_geometry_from_rylm(rdmol, 0, metric=metric)
     elif mode == "angles":
-        geometry = get_geometry_from_angles(rdmol, **kwargs_mode)
+        angle_central_idx = _to_int(kwargs_mode.get("central_idx", 0), 0)
+        angle_tol = _to_float(kwargs_mode.get("tol", 0.5), 0.5)
+        angle_kwargs = kwargs_mode.get("kwargs_angles", None)
+        eig_kwargs = kwargs_mode.get("kwargs_eig", None)
+        parsed_angle_kwargs = angle_kwargs if isinstance(angle_kwargs, dict) else None
+        parsed_eig_kwargs = eig_kwargs if isinstance(eig_kwargs, dict) else None
+        geometry = get_geometry_from_angles(
+            rdmol,
+            central_idx=angle_central_idx,
+            tol=angle_tol,
+            kwargs_angles=parsed_angle_kwargs,
+            kwargs_eig=parsed_eig_kwargs,
+        )
     else:
         raise ValueError(f"Calculation mode, {mode}, is not supported.")
+
+    if geometry is None:
+        geometry = "Undetermined"
 
     return geometry, n, rdmol

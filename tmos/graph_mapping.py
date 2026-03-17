@@ -4,16 +4,19 @@ from collections import defaultdict
 
 import networkx as nx
 from loguru import logger
+from rdkit.Chem.rdchem import Mol
+
+EnvironmentKey = tuple[str, int, tuple[str, ...]]
 
 
-def mol_to_graph(mol, remove_hydrogens=False):
-    """Convert an RDKit molecule to a NetworkX graph with atom features.
+def mol_to_graph(mol: Mol, remove_hydrogens: bool = False) -> nx.Graph:
+    """Convert an RDKit molecule to a `networkx.Graph`.
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule object.
-    remove_hydrogens : bool, optional
+    remove_hydrogens : bool, default=False
         If ``True``, hydrogen atoms are excluded from the graph.  Nodes retain
         their original RDKit atom indices so paths returned by NetworkX map
         directly back to atom indices in *mol* without re-indexing.
@@ -21,12 +24,24 @@ def mol_to_graph(mol, remove_hydrogens=False):
 
     Returns
     -------
-    G : networkx.Graph
-        NetworkX graph where nodes correspond to atom indices and edges correspond to bonds.
-        Each node contains the following attributes:
-            - symbol (str): Atomic symbol (e.g., 'C', 'O', 'N').
-            - degree (int): Number of bonds (degree) for the atom.
-            - atom_idx (int): Original RDKit atom index (equals the node key).
+    networkx.Graph
+        Graph where node IDs are RDKit atom indices and edges are bonds.
+        Node attributes:
+
+        - ``symbol`` : str
+            Atomic symbol.
+        - ``degree`` : int
+            Degree in the generated graph.
+        - ``atom_idx`` : int
+            Original RDKit atom index (same as node ID).
+
+    Examples
+    --------
+    >>> from rdkit import Chem
+    >>> mol = Chem.MolFromSmiles("CCO")
+    >>> graph = mol_to_graph(mol)
+    >>> sorted(graph.nodes)
+    [0, 1, 2]
     """
     G = nx.Graph()
 
@@ -66,8 +81,8 @@ def mol_to_graph(mol, remove_hydrogens=False):
     return G
 
 
-def get_atom_environment(graph, atom_idx):
-    """Get the chemical environment of an atom, including its neighbors.
+def get_atom_environment(graph: nx.Graph, atom_idx: int) -> EnvironmentKey:
+    """Return local environment key for one atom.
 
     Parameters
     ----------
@@ -78,13 +93,8 @@ def get_atom_environment(graph, atom_idx):
 
     Returns
     -------
-    environment : tuple
-        Tuple describing the atom's environment:
-            (symbol, degree, tuple of sorted neighbor symbols)
-        where:
-            - symbol (str): Atomic symbol of the atom.
-            - degree (int): Number of bonds (degree) for the atom.
-            - tuple of neighbor symbols (tuple of str): Sorted atomic symbols of neighboring atoms.
+    tuple of (str, int, tuple[str, ...])
+        ``(symbol, degree, sorted_neighbor_symbols)``.
     """
     node_data = graph.nodes[atom_idx]
     symbol = node_data["symbol"]
@@ -101,20 +111,20 @@ def get_atom_environment(graph, atom_idx):
     return (symbol, degree, tuple(neighbor_symbols))
 
 
-def implicit_hydrogen_atom_mapping(mol):
-    """Map atom indices to indices in implicit molecule case.
+def implicit_hydrogen_atom_mapping(mol: Mol) -> dict[int, int]:
+    """Map heavy-atom indices from explicit-H to implicit-H ordering.
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
-        The RDKit molecule with explicit hydrogens
+        RDKit molecule with explicit hydrogens.
 
     Returns
     -------
-    dict
-        A dictionary mapping atom indices from `mol` to atom indices when hydrogens are removed.
+    dict of int to int
+        Mapping from original atom index to heavy-atom index after removing H atoms.
     """
-    atom_mapping = defaultdict()
+    atom_mapping: dict[int, int] = {}
     i = 0
     for atm in mol.GetAtoms():
         if atm.GetSymbol() != "H":
@@ -123,25 +133,39 @@ def implicit_hydrogen_atom_mapping(mol):
     return atom_mapping
 
 
-def find_atom_mapping(mol1, mol2):
-    """Find a mapping between atom indices of two molecules based on element symbols and connectivity.
+def find_atom_mapping(mol1: Mol, mol2: Mol) -> dict[int, int]:
+    """Map atom indices between two topologically equivalent molecules.
 
     Parameters
     ----------
     mol1 : rdkit.Chem.rdchem.Mol
-        The original RDKit molecule.
+        Source molecule.
     mol2 : rdkit.Chem.rdchem.Mol
-        The target RDKit molecule to map onto.
+        Target molecule.
 
     Returns
     -------
-    dict
-        A dictionary mapping atom indices from `mol1` to atom indices in `mol2`.
+    dict of int to int
+        Mapping from atom index in ``mol1`` to atom index in ``mol2``.
 
     Raises
     ------
     ValueError
-        If the number of atoms or atom environments do not match between the molecules.
+        If node counts, environment signatures, or connectivity checks fail.
+
+    Notes
+    -----
+    When multiple atoms share the same first-order environment, mapping is
+    assigned by encounter order within each environment bucket.
+
+    Examples
+    --------
+    >>> from rdkit import Chem
+    >>> m1 = Chem.MolFromSmiles("CCO")
+    >>> m2 = Chem.MolFromSmiles("OCC")
+    >>> mapping = find_atom_mapping(m1, m2)
+    >>> sorted(mapping.keys()) == list(range(m1.GetNumAtoms()))
+    True
     """
 
     orig_graph = mol_to_graph(mol1)
@@ -149,11 +173,11 @@ def find_atom_mapping(mol1, mol2):
     if orig_graph.number_of_nodes() != correct_graph.number_of_nodes():
         raise ValueError("Number of atoms do not match in provided molecules.")
 
-    orig_environments = {}
+    orig_environments: dict[int, EnvironmentKey] = {}
     for atom_idx in orig_graph.nodes():
         orig_environments[atom_idx] = get_atom_environment(orig_graph, atom_idx)
 
-    correct_environments = {}
+    correct_environments: dict[int, EnvironmentKey] = {}
     for atom_idx in correct_graph.nodes():
         correct_environments[atom_idx] = get_atom_environment(correct_graph, atom_idx)
 
@@ -168,7 +192,7 @@ def find_atom_mapping(mol1, mol2):
     if set(orig_by_env.keys()) != set(correct_by_env.keys()):
         raise ValueError("Atom environments do not match. Mapping failed.")
 
-    mapping = {}
+    mapping: dict[int, int] = {}
     for env in orig_by_env.keys():
         orig_atoms = orig_by_env[env]
         correct_atoms = correct_by_env[env]
@@ -189,8 +213,12 @@ def find_atom_mapping(mol1, mol2):
     return mapping
 
 
-def validate_mapping(orig_graph, correct_graph, mapping):
-    """Validate that a given atom mapping preserves the connectivity between two molecular graphs.
+def validate_mapping(
+    orig_graph: nx.Graph,
+    correct_graph: nx.Graph,
+    mapping: dict[int, int],
+) -> None:
+    """Validate that a node mapping preserves graph connectivity.
 
     Parameters
     ----------
@@ -198,7 +226,7 @@ def validate_mapping(orig_graph, correct_graph, mapping):
         The graph representation of the original molecule.
     correct_graph : networkx.Graph
         The graph representation of the target molecule.
-    mapping : dict
+    mapping : dict of int to int
         A dictionary mapping node indices from `orig_graph` to `correct_graph`.
 
     Returns
@@ -208,7 +236,7 @@ def validate_mapping(orig_graph, correct_graph, mapping):
     Raises
     ------
     ValueError
-        If the mapping does not preserve the connectivity between the two graphs.
+        If mapping cardinality, uniqueness, or edge consistency checks fail.
 
     """
     if len(mapping) != orig_graph.number_of_nodes():
@@ -253,33 +281,34 @@ def validate_mapping(orig_graph, correct_graph, mapping):
 ##############################################
 
 
-def find_molecular_rings(mol_graph, min_ring_size=3, max_ring_size=12):
-    """
-    Find all rings (cycles) in a molecular graph represented as a NetworkX graph.
+def find_molecular_rings(
+    mol_graph: nx.Graph,
+    min_ring_size: int = 3,
+    max_ring_size: int = 12,
+) -> list[tuple[int, ...]]:
+    """Find unique rings from a graph cycle basis.
 
-    Parameters:
-    -----------
-    mol_graph : nx.Graph
-        NetworkX graph where nodes represent atomic indices and edges represent bonds
+    Parameters
+    ----------
+    mol_graph : networkx.Graph
+        Graph where nodes are atom indices and edges are bonds.
     min_ring_size : int, default=3
-        Minimum ring size to consider
+        Minimum cycle size to keep.
     max_ring_size : int, default=12
-        Maximum ring size to consider (helps avoid very large cycles)
+        Maximum cycle size to keep.
 
-    Returns:
-    --------
-    list[tuple[int, ...]]
-        List of tuples, each containing atomic indices forming a ring,
-        sorted by ring size (smallest first)
+    Returns
+    -------
+    list of tuple[int, ...]
+        Unique rings as tuples of atom indices, sorted by ring size then index.
 
-    Example:
+    Examples
     --------
     >>> import networkx as nx
-    >>> # Create a simple 6-membered ring (benzene-like)
-    >>> G = nx.Graph()
-    >>> G.add_edges_from([(0,1), (1,2), (2,3), (3,4), (4,5), (5,0)])
-    >>> rings = find_molecular_rings(G)
-    >>> print(rings)  # [(0, 1, 2, 3, 4, 5)]
+    >>> graph = nx.Graph()
+    >>> graph.add_edges_from([(0, 1), (1, 2), (2, 0)])
+    >>> find_molecular_rings(graph)
+    [(0, 1, 2)]
     """
     if not isinstance(mol_graph, nx.Graph):
         raise ValueError("Input must be a NetworkX Graph")
@@ -292,7 +321,7 @@ def find_molecular_rings(mol_graph, min_ring_size=3, max_ring_size=12):
         cycle_basis = nx.minimum_cycle_basis(mol_graph)
         for cycle in cycle_basis:
             if len(cycle) >= min_ring_size and len(cycle) <= max_ring_size:
-                min_idx = cycle.index(min(cycle))
+                min_idx: int = cycle.index(min(cycle))
                 normalized_cycle = tuple(cycle[min_idx:] + cycle[:min_idx])
                 cycles.append(normalized_cycle)
 
@@ -315,8 +344,13 @@ def find_molecular_rings(mol_graph, min_ring_size=3, max_ring_size=12):
     return unique_cycles
 
 
-def find_all_paths(graph, source, target, cutoff=None):
-    """Find all simple paths between two nodes in a graph.
+def find_all_paths(
+    graph: nx.Graph,
+    source: int,
+    target: int,
+    cutoff: int | None = None,
+) -> list[list[int]]:
+    """Find all simple paths between two nodes.
 
     A simple path visits each node at most once. For dense graphs or large
     cutoff values the number of paths can grow exponentially; use ``cutoff``
@@ -330,7 +364,7 @@ def find_all_paths(graph, source, target, cutoff=None):
         Index of the starting node.
     target : int
         Index of the ending node.
-    cutoff : int, optional
+    cutoff : int or None, default=None
         Maximum number of edges in any returned path. If ``None`` (default),
         no depth limit is applied.
 
@@ -346,8 +380,8 @@ def find_all_paths(graph, source, target, cutoff=None):
     ValueError
         If ``source`` or ``target`` is not a node in the graph.
 
-    Example
-    -------
+    Examples
+    --------
     >>> import networkx as nx
     >>> G = nx.Graph()
     >>> G.add_edges_from([(0, 1), (1, 2), (0, 2), (2, 3)])

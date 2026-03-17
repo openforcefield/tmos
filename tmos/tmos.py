@@ -6,6 +6,8 @@ an arrow pushing script is produced here with custom checks for ferrocene struct
 
 import copy
 from itertools import combinations
+from typing import TypeAlias
+from collections.abc import Sequence
 
 from loguru import logger
 import numpy as np
@@ -27,6 +29,9 @@ from .reference_values import (
 )
 from .geometry import get_geometry_from_mol
 
+ChargedAtoms: TypeAlias = dict[int, dict[str, object]]
+LigandInfo: TypeAlias = dict[str, object]
+
 # Initialize logger with INFO level by default
 configure_logger("INFO")
 
@@ -35,24 +40,37 @@ pt = GetPeriodicTable()
 
 
 def sanitize_molecule(
-    mol,
-    update_charges=True,
-    sanitize_aromaticity=False,
-    sanitize_kekulize=False,
-):
-    """Sanitize TMC molecule by updating formal charges to apparent value based on connectivity and use
-    RDKit sanitization without SANITIZE_SETAROMATICITY or SANITIZE_KEKULIZE.
+    mol: Chem.rdchem.Mol,
+    update_charges: bool = True,
+    sanitize_aromaticity: bool = False,
+    sanitize_kekulize: bool = False,
+) -> None:
+    """Sanitize a transition-metal-complex molecule in place.
+
+    The function optionally updates formal charges using connectivity-derived
+    heuristics, then applies RDKit sanitization with configurable aromaticity
+    and kekulization stages.
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule to sanitize
-    update_charges : bool, optional, default=True
-        If True, the charges are updated to apparent values based on connectivity
-    sanitize_aromaticity : bool, options, default=False
-        If False, removes the flag ``Chem.SanitizeFlags.SANITIZE_SETAROMATICITY``
-    sanitize_kekulize : bool, options, default=False
-        If False, removes the flag ``Chem.SanitizeFlags.SANITIZE_KEKULIZE``
+    update_charges : bool, default=True
+        If ``True``, update formal charges from bonding patterns before
+        sanitization.
+    sanitize_aromaticity : bool, default=False
+        If ``False``, disable ``SANITIZE_SETAROMATICITY``.
+    sanitize_kekulize : bool, default=False
+        If ``False``, disable ``SANITIZE_KEKULIZE``.
+
+    Returns
+    -------
+    None
+
+    Examples
+    --------
+    >>> mol = mol_from_smiles("C[N+](=O)[O-]", sanitize=False)
+    >>> sanitize_molecule(mol, sanitize_kekulize=True)
     """
 
     if update_charges:
@@ -71,8 +89,8 @@ def sanitize_molecule(
         )
 
 
-def compare_fingerprint(mol1, mol2):
-    """Compare molecular identity
+def compare_fingerprint(mol1: Chem.rdchem.Mol, mol2: Chem.rdchem.Mol) -> bool:
+    """Compare Morgan fingerprints for two molecules.
 
     Parameters
     ----------
@@ -92,32 +110,43 @@ def compare_fingerprint(mol1, mol2):
     return fp1 == fp2
 
 
-def mol_from_smiles(smiles, sanitize=True, sanitize_kwargs={}):
-    """Convert a SMILES string into a RDKit Molecule
+def mol_from_smiles(
+    smiles: str,
+    sanitize: bool = True,
+    sanitize_kwargs: dict[str, bool] | None = None,
+) -> Chem.rdchem.Mol:
+    """Convert a SMILES string into an RDKit molecule.
 
     Parameters
     ----------
     smiles : str
         SMILES string
-    sanitize : bool, optional
-        Perform sanitization with :func:`sanitize_molecule`, by default False
-    sanitize_kwargs : dict, optional, default={}
+    sanitize : bool, default=True
+        Perform sanitization with :func:`sanitize_molecule`.
+    sanitize_kwargs : dict of str to bool or None, default=None
         Keywords for :func:`sanitize_molecule`.
 
 
     Returns
     -------
     rdkit.Chem.rdchem.Mol
-        RDKit molecule that was produced
+        Parsed RDKit molecule.
+
+    Examples
+    --------
+    >>> mol = mol_from_smiles("CCO")
+    >>> mol.GetNumAtoms()
+    3
     """
+    sanitize_kwargs = {} if sanitize_kwargs is None else sanitize_kwargs
     mol = Chem.MolFromSmiles(smiles, sanitize=False)
     if sanitize:
         sanitize_molecule(mol, **sanitize_kwargs)
     return mol
 
 
-def mol_to_smiles(mol):
-    """Generate SMILES without isomeric information from a RDKit molecule
+def mol_to_smiles(mol: Chem.rdchem.Mol) -> str:
+    """Generate canonical non-isomeric SMILES from an RDKit molecule.
 
     Parameters
     ----------
@@ -127,23 +156,23 @@ def mol_to_smiles(mol):
     Returns
     -------
     str
-        Nonisomeric SMILES string
+        Canonical non-isomeric SMILES string with explicit hydrogens.
     """
     return Chem.MolToSmiles(mol, isomericSmiles=False, allHsExplicit=True)
 
 
-def wipe_molecule(mol):
+def wipe_molecule(mol: Chem.rdchem.Mol) -> Chem.rdchem.Mol:
     """Wipe all bond order and aromatic information from a molecule so that only single
     bonds remain.
 
     Parameters
     ----------
-    mol :rdkit.Chem.rdchem.Mol)
+    mol : rdkit.Chem.rdchem.Mol
         RDKit molecule
 
     Returns
     -------
-    mol : rdkit.Chem.rdchem.Mol
+    rdkit.Chem.rdchem.Mol
         Resulting molecule
 
     """
@@ -161,28 +190,28 @@ def wipe_molecule(mol):
     return mol
 
 
-def check_ligand_exception(mol, metal_coordinating_indices):
-    """Corrects formal charges and bonds for molecular exceptions.
+def check_ligand_exception(
+    mol: Chem.rdchem.Mol,
+    metal_coordinating_indices: list[int],
+) -> tuple[Chem.rdchem.Mol | None, list[int]]:
+    """Apply hard-coded ligand exception corrections.
 
-    Exceptions include carbon monoxide and hydrazoic acid molecules.
-    These molecules cannot be sanitized in RDKit as the connectivity does not align with
-    RDKit's expectations.
-
-    All exceptions returned by this function are L-type ligands
+    Exceptions cover known motifs that are difficult to sanitize from raw
+    connectivity alone (for example CO-like and azide-like edge cases).
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
-        RDKit molecule
+        Ligand molecule.
     metal_coordinating_indices : list[int]
         Ligand molecule index of atom that was connected to the metal
 
     Returns
     -------
-    mol : rdkit.Chem.rdchem.Mol
-        Resulting molecule, or None if the molecule is not an exception.
+    mol : rdkit.Chem.rdchem.Mol or None
+        Corrected molecule, or ``None`` if no exception pattern matches.
     metal_connected_orig_indices : list[int]
-        Original index of atom that was connected to the metal
+        Original atom indices connected to the metal.
 
     """
     mol = Chem.RWMol(copy.deepcopy(mol))
@@ -202,8 +231,8 @@ def check_ligand_exception(mol, metal_coordinating_indices):
         for atm in sorted(dummy_atoms, key=lambda x: -x.GetIdx()):
             mol.RemoveAtom(atm.GetIdx())
 
-    formula = get_molecular_formula(mol)
-    smiles = {  # Exceptions
+    formula: str = get_molecular_formula(mol)
+    smiles: str | None = {  # Exceptions
         "C1O1": "[C-]#[O+]",
         "H1N3": "[H][N]=[N+]=[N-]",
         "O1": "[O]([H])[H]",  # Instances of oxo tend to be unphysical
@@ -247,14 +276,15 @@ def check_ligand_exception(mol, metal_coordinating_indices):
     return mol, metal_connected_orig_indices
 
 
-def is_coordinate_ring(mol, metal_coordinating_indices):
-    """
-    Determines if a set of metal-coordinating atom indices forms a 5 or 6 member ring in the given molecule.
+def is_coordinate_ring(
+    mol: Chem.rdchem.Mol, metal_coordinating_indices: list[int]
+) -> bool:
+    """Determine whether coordinating atoms form a 5- or 6-member ring.
 
     Parameters
     ----------
     mol : rdkit.Chem.Mol
-        The molecule object to analyze.
+        Molecule to analyze.
     metal_coordinating_indices : list of int
         A list of atom indices that are coordinating a metal.
 
@@ -277,13 +307,13 @@ def is_coordinate_ring(mol, metal_coordinating_indices):
 
 
 def sanitize_ligand(
-    mol,
-    delete_list=[],
-    wipe=True,
-    method="hybrid",
-    charge=0,
-    sanitize=True,
-):
+    mol: Chem.rdchem.Mol,
+    delete_list: Sequence[Chem.rdchem.Atom] | None = None,
+    wipe: bool = True,
+    method: str = "hybrid",
+    charge: int = 0,
+    sanitize: bool = True,
+) -> Chem.rdchem.Mol | None:
     """Delete atoms from a molecule and then redetermine bond orders.
 
     Note:
@@ -297,7 +327,7 @@ def sanitize_ligand(
         List of RDKit atom objects to delete.
     wipe : bool, optional, default=True
         Whether to wipe bond information from the molecule
-    method : str, optional, default="hybrid"
+    method : str, default="hybrid"
         Choose the tool used to determine bond borders.
 
         - mdanalysis: ``_infer_bo_and_charges``
@@ -305,15 +335,18 @@ def sanitize_ligand(
         - openbabel: ``PerceiveBondOrders``
         - hybrid: Run openbabel, and if None, run mdanalysis
 
-    charge : int, optional, default=0
+    charge : int, default=0
         If using RDKit for bond orders, optionally set the charge. If set to 0, some atoms may be defined as radicals.
-    sanitize : bool, optional, default=True
+    sanitize : bool, default=True
         If True, the resulting molecule will be sanitized
 
-    Returns:
-        mol (rdkit.Chem.rdchem.Mol): RDKit molecule
+    Returns
+    -------
+    rdkit.Chem.rdchem.Mol or None
+        Sanitized ligand molecule, or ``None`` if sanitization fails.
     """
 
+    delete_list = [] if delete_list is None else delete_list
     mol_after = copy.deepcopy(mol)
     mol_after.UpdatePropertyCache(strict=False)
     if any(atm.GetNumImplicitHs() > 0 for atm in mol_after.GetAtoms()):
@@ -344,41 +377,35 @@ def sanitize_ligand(
 
 
 def get_ligand_attributes(
-    ligand_mol,
-    metal_coordinating_indices,
-    add_atom=None,
-    add_hydrogens=False,
-):
-    """
-    Analyze default valence and bonds to determine ligand attributes.
+    ligand_mol: Chem.rdchem.Mol,
+    metal_coordinating_indices: list[int],
+    add_atom: str | None = None,
+    add_hydrogens: bool = False,
+) -> LigandInfo:
+    """Analyze ligand valence/bonding to determine connector attributes.
 
     Parameters
     ----------
-    ligand_mol : rdkit.Chem.rdchem.Mol)
+    ligand_mol : rdkit.Chem.rdchem.Mol
         Ligand molecule with dummy atoms replacing ligand-metal bonds,
         denoted by ``atom.GetIntProp("__original_index") == -1``.
     metal_coordinating_indices : list[int]
         List of atom indices in ligand_mol that were connected to the metal. It is expected that they
         have a Internal Property, __original_index as well.
-    add_atom : str, optional, default=None
+    add_atom : str or None, default=None
         If an element symbol, the number of hanging bonds will be the number of this atom type present.
-    add_hydrogens : bool, optional, default=False
+    add_hydrogens : bool, default=False
         If True, add explicit hydrogens to the ligand.
 
     Returns
     -------
-    dict: ligand_best, with keys:
+    LigandInfo
+        Best ligand candidate with connector and charge metadata.
 
-        - "index" (int): Index of the ligand prospect.
-        - "rdmol" (rdkit.Chem.rdchem.Mol): Resolved ligand molecule.
-        - "smiles": Canonical explicit hydrogen smiles string generated from the RDKit molecule
-                    of the complex. Note that the dummy atom type is present to denote where the metal
-                    attaches; commonly I.
-        - "total_charge" (int): Total charge of the ligand.
-        - "hanging_bonds" (int): Number of unused valencies.
-        - "charged_atoms" (dict): Atom information by index as defined in :func:`tmos.build_rdmol.assess_atoms`.
-        - "L-type connectors" (list[int]): Original atom indices for L-type connectors.
-        - "X-type connectors" (list[int]): Original atom indices for X-type connectors.
+    Notes
+    -----
+    ``L-type connectors`` are neutral donor sites and ``X-type connectors`` are
+    anionic donor sites relative to the metal center.
 
     """
 
@@ -426,6 +453,7 @@ def get_ligand_attributes(
         logger.debug(f"There are {len(dummy_atoms)} dummy atoms")
 
         # Assumes carbon rings
+        dummy_atom_combinations = []
         if is_coordinate_ring(ligand_mol, metal_coordinating_indices):
             if len(metal_coordinating_indices) == 6:
                 dummy_atom_combinations = [
@@ -518,8 +546,13 @@ def get_ligand_attributes(
     return ligand_best
 
 
-def assert_same_ring(mol, ind1, ind2, max_ring_size=6):
-    """Determine whether two atoms are in the same chemical ring
+def assert_same_ring(
+    mol: Chem.rdchem.Mol,
+    ind1: int,
+    ind2: int,
+    max_ring_size: int = 6,
+) -> bool:
+    """Check whether two atoms belong to the same ring.
 
     Parameters
     ----------
@@ -529,13 +562,14 @@ def assert_same_ring(mol, ind1, ind2, max_ring_size=6):
         Index of first atom of interest
     ind2 : int
         Index of second atom of interest
-    max_ring_size : int, optional, default=6
+    max_ring_size : int, default=6
         Maximum ring size to consider
 
     Returns
     -------
     bool
-        True if the two indices are in the same ring
+        True if the two indices are in the same ring.
+
     """
     ring_info = mol.GetRingInfo()
 
@@ -549,15 +583,21 @@ def assert_same_ring(mol, ind1, ind2, max_ring_size=6):
         return ind2 in indices
 
 
-def detect_additional_bonds(mol, index=None, distance_tolerance=0.2):
+def detect_additional_bonds(
+    mol: Chem.rdchem.Mol,
+    index: int | None = None,
+    distance_tolerance: float = 0.2,
+) -> Chem.rdchem.Mol:
     """Use the coordinates to check if any other bonds could be defined.
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule
-    index : int, optional, default=None
+    index : int or None, default=None
         Index of target atom to look for bonds. If None, all bonds are added.
+    distance_tolerance : float, default=0.2
+        Additional distance tolerance used by coordinate-based bond detection.
 
     Returns
     -------
@@ -593,8 +633,8 @@ def detect_additional_bonds(mol, index=None, distance_tolerance=0.2):
     return mol
 
 
-def correct_ferrocene(mol, index):
-    """Correct a ferrocene containing molecule to ensure that all hydrogens are included
+def correct_ferrocene(mol: Chem.rdchem.Mol, index: int) -> tuple[Chem.rdchem.Mol, int]:
+    """Normalize bond annotations for ferrocene-like motifs.
 
     Parameters
     ----------
@@ -606,7 +646,7 @@ def correct_ferrocene(mol, index):
     Returns
     -------
     new_mol : rdkit.Chem.rdchem.Mol
-        Output molecule with corrected ferrocene group
+        Output molecule with corrected ferrocene motif.
     new_index : int
         The atomic index of the ferrocene metal center, if changed
     """
@@ -639,6 +679,7 @@ def correct_ferrocene(mol, index):
         carbon.UpdatePropertyCache(strict=False)
     mol = Chem.AddHs(mol, addCoords=True, explicitOnly=True, onlyOnAtoms=c_atoms)
 
+    new_index = index
     for a in mol.GetAtoms():
         a.SetIntProp("__original_index", a.GetIdx())
         if a.GetAtomicNum() in METALS_NUM:
@@ -648,7 +689,10 @@ def correct_ferrocene(mol, index):
     return mol, new_index
 
 
-def compute_centroid_excluding(conformer, exclude_atoms):
+def compute_centroid_excluding(
+    conformer: Chem.rdchem.Conformer,
+    exclude_atoms: list[int],
+) -> Point3D:
     """Compute the centroid of a molecule while excluding specified atom indices.
 
     Parameters
@@ -672,7 +716,7 @@ def compute_centroid_excluding(conformer, exclude_atoms):
     return Point3D(*centroid)
 
 
-def find_missing_coords(mol, value=0):
+def find_missing_coords(mol: Chem.rdchem.Mol, value: float = 0) -> bool:
     """Determine if an RDKit molecule has a relevant geometry
 
     In PDB CCD if the coordinates are missing, denoted by question marks in the cif, then the coordinate will be (0,0,0)
@@ -681,7 +725,7 @@ def find_missing_coords(mol, value=0):
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule to assess
-    value : float, optional, default=0
+    value : float, default=0
         Value used to compare to coordinates.
         If the sum across all dimensions for one atom is equal to this value, then a coordinate is missing.
 
@@ -698,7 +742,11 @@ def find_missing_coords(mol, value=0):
     return any(pos_sum == value)
 
 
-def fix_missing_coords(mol, tmc_idx, missing_coord_indices):
+def fix_missing_coords(
+    mol: Chem.rdchem.Mol,
+    tmc_idx: int,
+    missing_coord_indices: list[int],
+) -> None:
     """Add coordinates to RDKit molecule with missing coordinates
 
     Parameters
@@ -744,19 +792,21 @@ def fix_missing_coords(mol, tmc_idx, missing_coord_indices):
     ff.Minimize(maxIts=200000)
 
 
-def find_metal_index(mol):
-    """Find the molecule index for the metal
+def find_metal_index(mol: Chem.rdchem.Mol) -> int:
+    """Return the unique transition-metal atom index.
 
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
-        Transition state complex
+        Transition-metal complex.
 
-    Raises:
+    Raises
+    ------
     ValueError
         No transition metal found
 
-    Returns:
+    Returns
+    -------
     int
         Index of transition metal
     """
@@ -776,9 +826,13 @@ def find_metal_index(mol):
     return tmc_idx
 
 
-def get_tm_attributes(tm_mol, n_ltype, n_xtype, n_electrons=18):
-    """
-    Compute possible oxidation states, formal charges, and electron counts for a transition metal center.
+def get_tm_attributes(
+    tm_mol: Chem.rdchem.Mol,
+    n_ltype: int,
+    n_xtype: int,
+    n_electrons: int = 18,
+) -> tuple[list[int], np.ndarray, np.ndarray]:
+    """Compute oxidation-state, charge, and electron-count possibilities.
 
     Parameters
     ----------
@@ -788,7 +842,7 @@ def get_tm_attributes(tm_mol, n_ltype, n_xtype, n_electrons=18):
         Number of L-type connectors (neutral ligands).
     n_xtype : int
         Number of X-type connectors (anionic ligands).
-    n_electrons : int, optional, default=18
+    n_electrons : int, default=18
         Target electron count.
 
     Returns
@@ -803,12 +857,12 @@ def get_tm_attributes(tm_mol, n_ltype, n_xtype, n_electrons=18):
     """
 
     atom = tm_mol.GetAtomWithIdx(0)
-    n_group = group_numbers[atom.GetSymbol()]
+    n_group: int = group_numbers[atom.GetSymbol()]
     charge = n_group + n_xtype + 2 * n_ltype - n_electrons
     oxidation_state = n_xtype + charge
 
     # Shift values based on realistic oxidation states
-    oxidation_states = expected_oxidation_states[atom.GetSymbol()]
+    oxidation_states: list[int] = expected_oxidation_states[atom.GetSymbol()]
     offsets = np.array(oxidation_states) - oxidation_state
     charges = charge + offsets
     electron_counts = n_electrons - offsets
@@ -816,7 +870,11 @@ def get_tm_attributes(tm_mol, n_ltype, n_xtype, n_electrons=18):
     return oxidation_states, charges, electron_counts
 
 
-def cleave_mol_from_index(mol, index, add_atom=None):
+def cleave_mol_from_index(
+    mol: Chem.rdchem.Mol,
+    index: int,
+    add_atom: str | None = None,
+) -> tuple[list[Chem.rdchem.Mol], list[int]]:
     """Given an atomic index of an RDKit molecule, cleave the attaching bonds and return the resulting molecules
 
     The original atom index that corresponds to the output, `coordinating_atoms`, can be accessed with the atom
@@ -830,14 +888,14 @@ def cleave_mol_from_index(mol, index, add_atom=None):
         RDKit molecule
     index : int
         Index of atom to cleave from neighbors
-    add_atom : str, optional, default=None
+    add_atom : str or None, default=None
         If not None, add an atom of this type in place of the metal center
 
     Returns
     -------
-    fragments : list[rdkit.Chem.rdchem.Mol])
+    fragments : list of rdkit.Chem.rdchem.Mol
         List of RDKit molecules resulting from cleaved bonds
-    coordinating_atoms : list[int])
+    coordinating_atoms : list of int
         List of atom indices that were connected to the central atom
 
     """
@@ -852,7 +910,7 @@ def cleave_mol_from_index(mol, index, add_atom=None):
     MetalsOfInterest = "[#3,#11,#12,#19,#13,#21,#22,#23,#24,#25,#26,#27,#28,#29,#30,#39,#40,#41,#42,#43,#44,#45,#46,#47,#48,#57,#72,#73,#74,#75,#76,#77,#78,#79,#80]~[#1,#5,#6,#14,#15,#33,#51,#16,#34,#52,#17,#35,#53,#85]"
 
     # Find atoms directly bonded to the metal center
-    coordinating_atoms = [
+    coordinating_atoms: list[int] = [
         int(x) for x in np.nonzero(Chem.rdmolops.GetAdjacencyMatrix(mol)[index, :])[0]
     ]
     for a in mol.GetAtoms():
@@ -865,7 +923,7 @@ def cleave_mol_from_index(mol, index, add_atom=None):
     frag_mols = list(rdmolops.GetMolFrags(frags, asMols=True, sanitizeFrags=False))
     logger.debug(f"Along with the metal, there are {len(frag_mols)-1} ligands")
 
-    ind_metal = [
+    ind_metal: int = [
         ii
         for ii, f in enumerate(frag_mols)
         if sum([a.GetAtomicNum() in METALS_NUM for a in f.GetAtoms()])
@@ -897,7 +955,11 @@ def cleave_mol_from_index(mol, index, add_atom=None):
     return frag_mols, coordinating_atoms
 
 
-def prepare_complex(mol, value_missing_coord=0, add_hydrogens=False):
+def prepare_complex(
+    mol: Chem.rdchem.Mol,
+    value_missing_coord: float = 0,
+    add_hydrogens: bool = False,
+) -> Chem.rdchem.Mol:
     """Prepare complex removing anomalous substructs, adding additional metal connections,
     checking for missing coordinates, and possible addition of hydrogens.
 
@@ -905,9 +967,9 @@ def prepare_complex(mol, value_missing_coord=0, add_hydrogens=False):
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule representing the transition metal complex.
-    value_missing_coord : float, optional, default=0
+    value_missing_coord : float, default=0
         Value used to detect missing coordinates (e.g., 0 for (0,0,0)).
-    add_hydrogens : bool, optional, default=False
+    add_hydrogens : bool, default=False
         If True, add explicit hydrogens to the structure if needed.
 
     Returns
@@ -931,7 +993,7 @@ def prepare_complex(mol, value_missing_coord=0, add_hydrogens=False):
         logger.debug("Detect ferrocene!")
         mol, tmc_idx = correct_ferrocene(mol, tmc_idx)
 
-    missing_coord_indices = find_missing_coords(mol, value=value_missing_coord)
+    missing_coord_indices: bool = find_missing_coords(mol, value=value_missing_coord)
     if missing_coord_indices:
         raise ValueError("Molecule missing coordinates")
     #    mol = fix_missing_coords(mol, tmc_idx, missing_coord_indices)
@@ -940,12 +1002,12 @@ def prepare_complex(mol, value_missing_coord=0, add_hydrogens=False):
 
 
 def sanitize_complex(
-    mol,
-    value_missing_coord=0,
-    add_hydrogens=False,
-    add_atom="I",
-    sanitize=True,
-):
+    mol: Chem.rdchem.Mol,
+    value_missing_coord: float = 0,
+    add_hydrogens: bool = False,
+    add_atom: str = "I",
+    sanitize: bool = True,
+) -> dict[str, dict[str, object]]:
     """Sanitize ligands, determining X-type and L-type, returning a sanitized complex with
     oxidation state, number of electrons, and metal formal charge.
 
@@ -956,13 +1018,13 @@ def sanitize_complex(
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule representing the transition metal complex.
-    value_missing_coord : float, optional, default=0
+    value_missing_coord : float, default=0
         Value used to detect missing coordinates (e.g., 0 for (0,0,0)).
-    add_hydrogens : bool, optional, default=False
+    add_hydrogens : bool, default=False
         If True, add explicit hydrogens to the structure if needed.
-    add_atom : str, optional, default='I'
+    add_atom : str, default="I"
         Element symbol of the "dummy atom" used in :func:`cleave_mol_from_index`
-    sanitize : bool, optional, default=True
+    sanitize : bool, default=True
         If True, the final complex will be sanitized with :func:`sanitize_molecule`
 
     Raises
@@ -972,8 +1034,9 @@ def sanitize_complex(
 
     Returns
     -------
-    dict
-        Dictionary containing:
+    dict of str to dict of str to object
+        Candidate complexes keyed by a descriptive summary string. Each value
+        contains:
             - "metal_info": dict with keys:
                 - "rdmol": RDKit molecule of the transition metal center.
                 - "oxidation_state": Oxidation state of the metal center.
@@ -996,6 +1059,13 @@ def sanitize_complex(
                 - "oxidation_state": Oxidation state of the metal center.
                 - "total_charge": Overall charge of the complex.
                 - "geometry": Geometry information of the complex.
+
+    Examples
+    --------
+    >>> # Typically called after loading a full TMC structure with coordinates.
+    >>> # result = sanitize_complex(mol)
+    >>> # isinstance(result, dict)
+    >>> # True
     """
 
     mol = prepare_complex(
@@ -1061,7 +1131,7 @@ def sanitize_complex(
             sanitize=sanitize,
         )
         metal_symbol = tmp_tm_mol.GetAtoms()[0].GetSymbol()
-        charge = sum([a.GetFormalCharge() for a in tmc_mol.GetAtoms()])
+        charge: int = sum([a.GetFormalCharge() for a in tmc_mol.GetAtoms()])
         outputs[
             f"{metal_symbol}; {n_bonds}:{geometry_angles}; OS:{tm_ox}; q:{charge}; Nel:{tm_nel}"
         ] = {
@@ -1095,8 +1165,12 @@ def sanitize_complex(
 
 
 def reform_metal_complex(
-    tm_mol, lig_info, coordinating_atoms, tm_charge=0, sanitize=True
-):
+    tm_mol: Chem.rdchem.Mol,
+    lig_info: list[LigandInfo],
+    coordinating_atoms: list[int],
+    tm_charge: int = 0,
+    sanitize: bool = True,
+) -> Chem.rdchem.RWMol:
     """Reconnects ligands to a transition metal center to reform a metal complex.
 
     This function takes a transition metal molecule and a list of ligand molecules,
@@ -1105,15 +1179,15 @@ def reform_metal_complex(
 
     Parameters
     ----------
-    tm_mol : tuple[rdkit.Chem.rdchem.Mol, int]
-        A tuple containing the RDKit molecule of the transition metal center and its formal charge.
-    lig_info : list[tuple[rdkit.Chem.rdchem.Mol, int, int, Any]]
-        A list of dictionaries defined in :func:`get_ligand_assessment`
+    tm_mol : rdkit.Chem.rdchem.Mol
+        RDKit molecule of the transition metal center.
+    lig_info : list[LigandInfo]
+        Ligand dictionaries returned by :func:`get_ligand_attributes`.
     coordinating_atoms : list[int]
         List of atom indices (from the original complex) that should be reconnected to the metal center.
-    tm_charge : int, optional, default=0
+    tm_charge : int, default=0
         Formal charge of the transition metal center.
-    sanitize : bool, optional, default=True
+    sanitize : bool, default=True
         If True, will sanitize the final complex with :func:`sanitize_molecule`
 
     Returns
