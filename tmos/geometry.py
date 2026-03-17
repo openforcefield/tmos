@@ -4,10 +4,27 @@ from rdkit.Geometry import Point3D
 from loguru import logger
 from typing import TypeAlias
 
-from pymatgen.symmetry.analyzer import PointGroupAnalyzer
-from pymatgen.core.structure import Molecule
-from posym import SymmetryMolecule
-from rylm.rylm import Rylm, Similarity, Fingerprint
+try:
+    from pymatgen.symmetry.analyzer import PointGroupAnalyzer
+    from pymatgen.core.structure import Molecule
+
+    _HAS_PYMATGEN = True
+except ImportError:
+    _HAS_PYMATGEN = False
+
+try:
+    from posym import SymmetryMolecule
+
+    _HAS_POSYM = True
+except ImportError:
+    _HAS_POSYM = False
+
+try:
+    from rylm.rylm import Rylm, Similarity, Fingerprint
+
+    _HAS_RYLM = True
+except ImportError:
+    _HAS_RYLM = False
 
 from .reference_values import (
     ideal_angles,
@@ -407,6 +424,10 @@ def get_geometry_from_posym(
 ) -> str:
     """Assign a Schoenflies point group using `posym` best-match scoring.
 
+    Requires the optional ``posym`` package::
+
+        pip install posym
+
     Parameters
     ----------
     rdmol : rdkit.Chem.rdchem.Mol
@@ -420,7 +441,18 @@ def get_geometry_from_posym(
     -------
     str
         Selected Schoenflies point-group symbol.
+
+    Raises
+    ------
+    ImportError
+        If ``posym`` is not installed.
     """
+    if not _HAS_POSYM:
+        raise ImportError(
+            "posym is required for get_geometry_from_posym. "
+            "Install it with:\n"
+            "  pip install posym"
+        )
     coordinates = rdmol.GetConformers()[0].GetPositions()
     symbols = [a.GetSymbol() for a in rdmol.GetAtoms()]
 
@@ -457,6 +489,10 @@ def get_geometry_from_pymatgen(
 ) -> str:
     """Assign a Schoenflies point group using `pymatgen` symmetry analysis.
 
+    Requires the optional ``pymatgen`` package::
+
+        pip install pymatgen
+
     Parameters
     ----------
     rdmol : rdkit.Chem.rdchem.Mol
@@ -472,7 +508,20 @@ def get_geometry_from_pymatgen(
     -------
     str
         Schoenflies point-group symbol.
+
+    Raises
+    ------
+    ImportError
+        If ``pymatgen`` is not installed.
     """
+    if not _HAS_PYMATGEN:
+        raise ImportError(
+            "pymatgen is required for get_geometry_from_pymatgen. "
+            "Install it with:\n"
+            "  pip install pymatgen\n"
+            "or with conda:\n"
+            "  conda install -c conda-forge pymatgen"
+        )
     pymatgen_mol = Molecule(
         species=[atom.GetSymbol() for atom in rdmol.GetAtoms()],
         coords=[
@@ -531,6 +580,10 @@ def get_geometry_from_rylm(
 ) -> str:
     """Assign geometry label from rotational fingerprints (`rylm`).
 
+    Requires the optional ``rylm`` package (not on PyPI)::
+
+        pip install git+https://github.com/chrisiacovella/rylm.git
+
     Parameters
     ----------
     rdmol : rdkit.Chem.rdchem.Mol
@@ -545,12 +598,23 @@ def get_geometry_from_rylm(
     str
         Geometry label with highest fingerprint similarity score.
 
+    Raises
+    ------
+    ImportError
+        If ``rylm`` is not installed.
+
     Examples
     --------
     >>> # label = get_geometry_from_rylm(mol, central_idx=0)
     >>> # isinstance(label, str)
     >>> # True
     """
+    if not _HAS_RYLM:
+        raise ImportError(
+            "rylm is required for get_geometry_from_rylm. "
+            "It is not available on PyPI; install it from GitHub:\n"
+            "  pip install git+https://github.com/chrisiacovella/rylm.git"
+        )
     coords = rdmol_to_unit_coordinates(rdmol, central_idx)
 
     geometry_fingerprints_dict = steinhardt_order_parameters[len(coords) - 1]

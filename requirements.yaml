@@ -4,21 +4,31 @@ channels:
   - conda-forge
 
 dependencies:
+  # Core runtime
   - python=3.11
   - pip
   - rdkit>=2025.3.3
   - openbabel
-  - mdanalysis>=2.10.0
   - networkx
   - qcelemental
   - periodictable
   - numpy
-  - deepdiff
-  - py3Dmol
   - loguru
-  - pymatgen
 
+  # Optional — geometry analysis (pip install "tmos[geometry]")
+  - pymatgen
+  - posym
+
+  # Optional — 3-D visualization (pip install "tmos[viz]")
+  - py3Dmol
+
+  # Documentation build (pip install "tmos[docs]")
   - pydata-sphinx-theme
   - sphinx-design
   - sphinx-copybutton
   - nbsphinx
+
+  - pip:
+    # rylm is not on PyPI (optional — required for geometry mode="rylm")
+    # pip install git+https://github.com/chrisiacovella/rylm.git
+    - git+https://github.com/chrisiacovella/rylm.git

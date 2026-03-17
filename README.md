@@ -18,27 +18,62 @@ Together, these tools enable automated, reproducible workflows for transition me
 
 ## Installation
 
-* Step 1: Download the main branch from our GitHub page as a zip file, or clone it to your working directory with:
+### Requirements
 
-    ``git clone https://github.com/openforcefield/tmos``
+Python ≥ 3.10 is required. Core dependencies (`rdkit`, `openbabel`, `networkx`, `qcelemental`, `periodictable`, `numpy`, `loguru`) are declared in `pyproject.toml` and installed automatically by `pip`.
 
-* Step 2 (Optional): If you are using conda and you want to create a new environment for this package you may install with:
+> **Note**: `rdkit` and `openbabel` have compiled C/C++ extensions. Installing via **conda/mamba is strongly recommended** to avoid build issues. Pure-`pip` installs may work on some platforms but are not guaranteed.
 
-    ``conda env create -f requirements.yaml``
+### Option A — conda / micromamba (recommended)
 
-* Step 3: Install package with:
+Clone the repository and create the bundled environment (includes all optional dependencies):
 
-    ``pip install tmos/.``
+```bash
+git clone https://github.com/openforcefield/tmos
+cd tmos
+micromamba env create -f requirements.yaml   # or: conda env create -f requirements.yaml
+micromamba activate tmos                     # or: conda activate tmos
+pip install -e .
+```
 
-    or change directories and run
+### Option B — pip only
 
-    ``pip install .``
+```bash
+git clone https://github.com/openforcefield/tmos
+cd tmos
+pip install .
+```
 
-    Adding the flag ``-e`` will allow you to make changes that will be functional without reinstallation.
+Add `-e` for an editable / development install.
 
-* Step 4: Initialize pre-commits (for developers)
+### Optional dependencies
 
-    ``pre-commit install``
+Several features require extra packages that are *not* installed by default:
+
+| Feature | Extra | Install command |
+|---|---|---|
+| Geometry (pymatgen, posym) | `geometry` | `pip install "tmos[geometry]"` |
+| 3-D visualization (py3Dmol) | `viz` | `pip install "tmos[viz]"` |
+| Documentation build | `docs` | `pip install "tmos[docs]"` |
+| Tests | `test` | `pip install "tmos[test]"` |
+
+Install multiple extras at once: `pip install "tmos[geometry,viz,test]"`.
+
+**rylm** is required for `geometry mode="rylm"` and is not on PyPI. Install it directly from GitHub:
+
+```bash
+pip install git+https://github.com/chrisiacovella/rylm.git
+```
+
+If an optional dependency is absent, the relevant function raises a clear `ImportError` with the exact install command.
+
+### Developer setup
+
+```bash
+pip install "tmos[geometry,viz,test]"
+pip install git+https://github.com/chrisiacovella/rylm.git
+pre-commit install
+```
 
 ### Copyright
 

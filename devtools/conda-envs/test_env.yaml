@@ -1,18 +1,37 @@
 name: test
 channels:
+  - conda-forge
 
-  - defaults
 dependencies:
-    # Base depends
-  - python
+  # Base
+  - python=3.11
   - pip
 
-    # Testing
-  - pytest
+  # Core runtime (mirrors pyproject.toml dependencies)
+  - rdkit>=2025.3.3
+  - openbabel
+  - networkx
+  - qcelemental
+  - periodictable
+  - numpy
+  - loguru
+
+  # Optional — geometry (pip install "tmos[geometry]")
+  - pymatgen
+  - posym
+
+  # Optional — visualization (pip install "tmos[viz]")
+  - py3Dmol
+
+  # Testing
+  - pytest>=6.1.2
   - pytest-cov
-  - codecov
+  - pytest-regressions
+  - pytest-datadir
+  - pytest-rerunfailures
 
-    # Pip-only installs
-  #- pip:
-  #  - codecov
-
+  - pip:
+    # rylm is not on PyPI or conda-forge
+    - git+https://github.com/chrisiacovella/rylm.git
+    # codecov CLI for coverage upload in CI
+    - codecov-cli

@@ -11,14 +11,19 @@ from contextlib import contextmanager
 from typing import TypeAlias, TypedDict
 
 import numpy as np
-import py3Dmol
 from loguru import logger
 
 from rdkit import Chem
-from rdkit.Chem.Draw import IPythonConsole
 from rdkit.Chem.rdchem import Atom, Mol
 
-IPythonConsole.molSize = 500, 500
+try:
+    import py3Dmol
+    from rdkit.Chem.Draw import IPythonConsole
+
+    IPythonConsole.molSize = 500, 500
+    _HAS_PY3DMOL = True
+except ImportError:
+    _HAS_PY3DMOL = False
 
 DiagnosticValue: TypeAlias = (
     int | float | str | bool | None | list[str] | list["NeighborInfo"]
@@ -205,8 +210,12 @@ def view3D(
     label_symbol: bool = False,
     kekulize: bool = True,
     indices: list[int] | None = None,
-) -> None | py3Dmol.view:
+) -> None:
     """Create a `py3Dmol` view for an RDKit molecule.
+
+    Requires the optional ``py3Dmol`` package::
+
+        pip install py3Dmol
 
     Parameters
     ----------
@@ -226,12 +235,23 @@ def view3D(
     py3Dmol.view or None
         View object for interactive display.
 
+    Raises
+    ------
+    ImportError
+        If ``py3Dmol`` is not installed.
+
     Examples
     --------
     >>> # viewer = view3D(mol, label_idx=True)
     >>> # viewer is not None
     >>> # True
     """
+    if not _HAS_PY3DMOL:
+        raise ImportError(
+            "py3Dmol is required for view3D. "
+            "Install it with:\n"
+            "  pip install py3Dmol"
+        )
     if molecule is None:
         return None
     mol = Chem.Mol(molecule)

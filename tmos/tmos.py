@@ -1080,7 +1080,10 @@ def sanitize_complex(
         mol, tmc_idx, add_atom=add_atom
     )
     geometry_angles, n_bonds, _ = get_geometry_from_mol(mol, tmc_idx, mode="angles")
-    geometry_rylm, _, _ = get_geometry_from_mol(mol, tmc_idx, mode="rylm")
+    try:
+        geometry_rylm, _, _ = get_geometry_from_mol(mol, tmc_idx, mode="rylm")
+    except ImportError:
+        geometry_rylm = "Unavailable (install rylm: pip install git+https://github.com/chrisiacovella/rylm.git)"
 
     total_xtype = 0
     total_ltype = 0
