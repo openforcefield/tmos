@@ -19,7 +19,6 @@ from typing import TypeAlias
 import networkx as nx
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import rdDetermineBonds
 from rdkit.Chem.rdDetermineBonds import DetermineBondOrders
 from rdkit.Chem.rdchem import Atom, Bond, Mol
 from openbabel import openbabel as ob
@@ -135,6 +134,38 @@ _POS_CHARGE_PENALTY: dict[int, int] = {
     53: 40,
 }
 
+# Element-wise formal-charge bounds used by charge balancing passes.
+_FORMAL_CHARGE_BOUNDS: dict[int, tuple[int, int]] = {
+    6: (-1, 1),
+    7: (-1, 1),
+    8: (-1, 1),
+    9: (-1, 0),
+    15: (-1, 1),
+    16: (-1, 1),
+    17: (-1, 0),
+    35: (-1, 0),
+    53: (-1, 0),
+}
+
+
+def _formal_charge_in_bounds(atomic_num: int, formal_charge: int) -> bool:
+    """Return ``True`` if formal charge is within element-specific bounds.
+
+    Parameters
+    ----------
+    atomic_num : int
+        Atomic number.
+    formal_charge : int
+        Formal charge to validate.
+
+    Returns
+    -------
+    bool
+        ``True`` when formal charge is allowed for this element.
+    """
+    lo, hi = _FORMAL_CHARGE_BOUNDS.get(atomic_num, (-2, 2))
+    return lo <= formal_charge <= hi
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -177,7 +208,54 @@ def _valid_valences(atom: Atom) -> list[int]:
     list of int
         Non-negative valence values from the periodic table.
     """
+
     return sorted(v for v in pt.GetValenceList(atom.GetAtomicNum()) if v >= 0)
+
+
+def _best_formal_charge(atom: Atom, bv: float) -> int | None:
+    """Return preferred bounded formal charge for one atom at bond valence ``bv``.
+
+    Parameters
+    ----------
+    atom : rdkit.Chem.rdchem.Atom
+        Atom to evaluate.
+    bv : float
+        Bond valence estimate.
+
+    Returns
+    -------
+    int or None
+        Preferred formal charge, or ``None`` when no valence shells exist.
+    """
+    valences = _valid_valences(atom)
+    if not valences:
+        return None
+
+    atomic_num = atom.GetAtomicNum()
+    prefer_lower = atomic_num in _PREFER_LOWER_SHELL
+    candidates: list[tuple[float, int, float, int]] = []
+    for shell in valences:
+        fc = int(round(bv - shell))
+        if not _formal_charge_in_bounds(atomic_num, fc):
+            continue
+        shell_err = abs(bv - shell)
+        tie_shell = shell if prefer_lower else -shell
+        candidates.append(
+            (shell_err, _atom_charge_penalty(atomic_num, fc), tie_shell, fc)
+        )
+
+    if candidates:
+        candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+        return candidates[0][3]
+
+    # Fallback when all bounded states are excluded: preserve old behavior and
+    # clamp into allowed bounds so downstream charge balancing stays feasible.
+    best = _best_shell(atom, bv)
+    if best is None:
+        return None
+    fc = int(round(bv - best))
+    lo, hi = _FORMAL_CHARGE_BOUNDS.get(atomic_num, (-2, 2))
+    return max(lo, min(hi, fc))
 
 
 def _bond_valence(atom: Atom, integer: bool = False) -> float | int:
@@ -317,6 +395,27 @@ def _max_allowed_int_bv_at_fc(atom: Atom, proposed_fc: int) -> int:
         return 99
     max_fc_tol: int = _MAX_BOND_FC.get(atomic_num, _DEFAULT_MAX_BOND_FC)
     return max(valences) + max_fc_tol
+
+
+def _has_overvalenced_atoms(mol: Mol) -> bool:
+    """Return ``True`` when any atom exceeds integer bond-valence allowance.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        Molecule to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` if at least one atom is currently over-valenced.
+    """
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() == 0:
+            continue
+        if _bond_valence(atom, integer=True) > _max_allowed_int_bv(atom):
+            return True
+    return False
 
 
 def molecule_charge_penalty(mol: Mol) -> int:
@@ -461,6 +560,8 @@ def _enforce_target_charge(mol: Mol) -> Mol:
 
             allowed_fc: list[int] = sorted({int(round(bv - v)) for v in valences})
             for new_fc in allowed_fc:
+                if not _formal_charge_in_bounds(atomic_num, new_fc):
+                    continue
                 move = new_fc - old_fc
                 if move == 0 or move * step <= 0:
                     continue
@@ -1744,17 +1845,35 @@ class _GraphMoveEngine:
         rdkit.Chem.rdchem.Mol or None
             Sanitized molecule when possible.
         """
-        try:
-            candidate = _assign_formal_charges(Chem.Mol(mol))
-            Chem.SanitizeMol(candidate)
-            return candidate
-        except Exception:
+
+        def _sanitize_or_none(candidate: Mol) -> Mol | None:
             try:
-                cleaned = _strip_radicals_and_reassign(mol)
-                Chem.SanitizeMol(cleaned)
-                return cleaned
+                Chem.SanitizeMol(candidate)
+                return candidate
             except Exception:
                 return None
+
+        # Fast path: no structural edits, only formal-charge assignment.
+        candidate = _assign_formal_charges(Chem.Mol(mol))
+        sanitized = _sanitize_or_none(candidate)
+        if sanitized is not None:
+            return sanitized
+
+        # Repair path: demote over-valence first, then reassign charges.
+        repaired = Chem.Mol(candidate)
+        if _has_overvalenced_atoms(repaired):
+            repaired = _fix_overvalenced(repaired)
+        repaired = _assign_formal_charges(repaired)
+        sanitized = _sanitize_or_none(repaired)
+        if sanitized is not None:
+            return sanitized
+
+        # Last resort: remove radicals, then repeat valence repair.
+        cleaned = _strip_radicals_and_reassign(Chem.Mol(mol))
+        if _has_overvalenced_atoms(cleaned):
+            cleaned = _fix_overvalenced(cleaned)
+        cleaned = _assign_formal_charges(cleaned)
+        return _sanitize_or_none(cleaned)
 
     @staticmethod
     def _kekulized_or_none(mol: Mol) -> Mol | None:
@@ -1873,6 +1992,8 @@ class _GraphMoveEngine:
                     continue
 
                 new_fc = atom.GetFormalCharge() + step
+                if not _formal_charge_in_bounds(atom.GetAtomicNum(), new_fc):
+                    continue
                 # Guard: skip if the atom would become over-valenced at new_fc.
                 int_bv = _bond_valence(atom, integer=True)
                 if int_bv > _max_allowed_int_bv_at_fc(atom, new_fc):
@@ -1976,8 +2097,20 @@ class _GraphMoveEngine:
 
         partial = _prepare_for_cleanup(Chem.Mol(mol))
         partial = _strip_radicals_and_reassign(partial)
-        Chem.SanitizeMol(partial)
-        return partial
+        if _has_overvalenced_atoms(partial):
+            partial = _fix_overvalenced(partial)
+            partial = _assign_formal_charges(partial)
+        try:
+            Chem.SanitizeMol(partial)
+            return partial
+        except Exception:
+            fallback = _fix_overvalenced(Chem.Mol(partial))
+            fallback = _assign_formal_charges(fallback)
+            try:
+                Chem.SanitizeMol(fallback)
+                return fallback
+            except Exception:
+                return fallback
 
     @classmethod
     def _path_lookahead_first_improvement(
@@ -2116,8 +2249,8 @@ class _GraphMoveEngine:
                 path_candidate = cls._path_lookahead_first_improvement(
                     Chem.Mol(move_base),
                     path_mode="charged_sinks",
-                    max_active_sources=4,
-                    max_partners=8,
+                    max_active_sources=1,
+                    max_partners=3,
                 )
             mol = cls._prefer_lower_penalty(mol, path_candidate)
 
@@ -2136,8 +2269,8 @@ class _GraphMoveEngine:
                 negpos_path_candidate = cls._path_lookahead_first_improvement(
                     Chem.Mol(mol),
                     path_mode="neg_pos",
-                    max_active_sources=4,
-                    max_partners=6,
+                    max_active_sources=1,
+                    max_partners=3,
                 )
             mol = cls._prefer_lower_penalty(mol, negpos_path_candidate)
 
@@ -2175,6 +2308,82 @@ class _GraphMoveEngine:
         rdkit.Chem.rdchem.Mol
             Best sanitizable molecule found.
         """
+
+        def _candidate_with_target_charge_or_none(candidate: Mol) -> Mol | None:
+            """Return candidate only if it satisfies target charge, or can be repaired.
+
+            Parameters
+            ----------
+            candidate : rdkit.Chem.rdchem.Mol
+                Candidate molecule.
+
+            Returns
+            -------
+            rdkit.Chem.rdchem.Mol or None
+                Charge-consistent candidate when available.
+            """
+            target: None | int = _target_charge_or_none(candidate)
+            if target is None:
+                return candidate
+
+            current: int = sum(a.GetFormalCharge() for a in candidate.GetAtoms())
+            if current == target:
+                try:
+                    sanitized = Chem.Mol(candidate)
+                    Chem.SanitizeMol(sanitized)
+                    return sanitized
+                except Exception:
+                    pass
+
+            repaired = cls._force_charge_balance(Chem.Mol(candidate))
+            if _has_overvalenced_atoms(repaired):
+                repaired = _fix_overvalenced(repaired)
+
+            if sum(a.GetFormalCharge() for a in repaired.GetAtoms()) == target:
+                try:
+                    Chem.SanitizeMol(repaired)
+                    return repaired
+                except Exception:
+                    pass
+
+            repaired = _assign_formal_charges(repaired)
+
+            if sum(a.GetFormalCharge() for a in repaired.GetAtoms()) == target:
+                try:
+                    Chem.SanitizeMol(repaired)
+                    return repaired
+                except Exception:
+                    pass
+
+            return _retarget_bond_orders_rdkit(candidate, target)
+
+        def _prefer_candidate(current: Mol | None, candidate: Mol | None) -> Mol | None:
+            """Return preferred candidate by objective then charge penalty.
+
+            Parameters
+            ----------
+            current : rdkit.Chem.rdchem.Mol or None
+                Current best candidate.
+            candidate : rdkit.Chem.rdchem.Mol or None
+                New candidate to compare.
+
+            Returns
+            -------
+            rdkit.Chem.rdchem.Mol or None
+                Preferred candidate.
+            """
+            if candidate is None:
+                return current
+            if current is None:
+                return candidate
+
+            cand_key = (
+                _charge_objective(candidate),
+                molecule_charge_penalty(candidate),
+            )
+            curr_key = (_charge_objective(current), molecule_charge_penalty(current))
+            return candidate if cand_key < curr_key else current
+
         work = _prepare_for_cleanup(Chem.Mol(mol))
 
         local_engine = cls(
@@ -2202,6 +2411,15 @@ class _GraphMoveEngine:
 
             work = cls._stage_once(work, local_engine, global_engine)
             work_objective = _charge_objective(work)
+
+            quick = cls._sanitize_candidate_or_none(work)
+            if (
+                quick is not None
+                and _target_charge_delta(quick) == 0
+                and molecule_charge_penalty(quick) == 0
+            ):
+                return quick
+
             if (
                 work_objective[0] == 0
                 and work_objective[2] == 0
@@ -2221,30 +2439,39 @@ class _GraphMoveEngine:
         for _ in range(2):
             sanitized = cls._sanitize_candidate_or_none(work)
             if sanitized is not None:
+                best_accept: Mol | None = None
+
                 forced = cls._force_charge_balance(sanitized)
                 if _target_charge_delta(forced) == 0:
                     try:
                         Chem.SanitizeMol(forced)
-                        return forced
                     except Exception:
                         forced = _fix_overvalenced(forced)
                         forced = _assign_formal_charges(forced)
                         try:
                             Chem.SanitizeMol(forced)
-                            return forced
                         except Exception:
                             pass
+                    accepted = _candidate_with_target_charge_or_none(forced)
+                    best_accept = _prefer_candidate(best_accept, accepted)
+
                 try:
                     Chem.SanitizeMol(forced)
-                    return forced
+                    accepted = _candidate_with_target_charge_or_none(forced)
+                    best_accept = _prefer_candidate(best_accept, accepted)
                 except Exception:
                     fixed = _fix_overvalenced(Chem.Mol(sanitized))
                     fixed = _assign_formal_charges(fixed)
                     try:
                         Chem.SanitizeMol(fixed)
-                        return fixed
+                        accepted = _candidate_with_target_charge_or_none(fixed)
+                        best_accept = _prefer_candidate(best_accept, accepted)
                     except Exception:
-                        return sanitized
+                        accepted = _candidate_with_target_charge_or_none(sanitized)
+                        best_accept = _prefer_candidate(best_accept, accepted)
+
+                if best_accept is not None:
+                    return best_accept
 
             next_work = cls._stage_once(Chem.Mol(work), local_engine, global_engine)
             if _molecule_state_fingerprint(next_work) == _molecule_state_fingerprint(
@@ -2257,7 +2484,29 @@ class _GraphMoveEngine:
             else:
                 break
 
-        return cls.finalize_sanitized(work)
+        final = cls.finalize_sanitized(work)
+        accepted = _candidate_with_target_charge_or_none(final)
+        if accepted is not None:
+            return accepted
+
+        target = _target_charge_or_none(final)
+        if target is not None:
+            for seed in (work, mol):
+                retry = _retarget_bond_orders_rdkit(Chem.Mol(seed), target)
+                if retry is not None:
+                    return retry
+
+                forced = cls._force_charge_balance(Chem.Mol(seed))
+                forced = _assign_formal_charges(forced)
+                if sum(a.GetFormalCharge() for a in forced.GetAtoms()) != target:
+                    continue
+                try:
+                    Chem.SanitizeMol(forced)
+                    return forced
+                except Exception:
+                    continue
+
+        return final
 
 
 def _fix_overvalenced(mol: Mol) -> Mol:
@@ -2357,7 +2606,7 @@ def _fix_overvalenced(mol: Mol) -> Mol:
                         if b.GetOtherAtom(atom).GetAtomicNum() not in (7, 8, 15, 16)
                     ]
                 if not filtered:
-                    continue
+                    filtered = single
                 longest = _geom_longest(filtered, idx)
                 mol.RemoveBond(longest.GetBeginAtomIdx(), longest.GetEndAtomIdx())
                 mol.UpdatePropertyCache(strict=False)
@@ -2371,6 +2620,133 @@ def _fix_overvalenced(mol: Mol) -> Mol:
 
     mol.UpdatePropertyCache(strict=False)
     return mol.GetMol()
+
+
+def _resolve_oxygen_oxygen_artifacts(mol: Mol) -> Mol:
+    """Remove implausible O-O single bonds near P/S when objective improves.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        Molecule to process.
+
+    Returns
+    -------
+    rdkit.Chem.rdchem.Mol
+        Best candidate after optional O-O cleanup.
+    """
+    base = Chem.Mol(mol)
+    best = Chem.Mol(base)
+    best_obj = _charge_objective(best)
+
+    for bond in base.GetBonds():
+        if bond.GetBondType() != Chem.BondType.SINGLE:
+            continue
+
+        begin = bond.GetBeginAtom()
+        end = bond.GetEndAtom()
+        if begin.GetAtomicNum() != 8 or end.GetAtomicNum() != 8:
+            continue
+
+        b_neighbors = [
+            nbr.GetAtomicNum()
+            for nbr in begin.GetNeighbors()
+            if nbr.GetIdx() != end.GetIdx()
+        ]
+        e_neighbors = [
+            nbr.GetAtomicNum()
+            for nbr in end.GetNeighbors()
+            if nbr.GetIdx() != begin.GetIdx()
+        ]
+        if not any(z in (15, 16) for z in b_neighbors + e_neighbors):
+            continue
+
+        trial = Chem.RWMol(base)
+        trial.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+        trial_mol = trial.GetMol()
+        trial_mol.UpdatePropertyCache(strict=False)
+        trial_mol = _assign_formal_charges(trial_mol)
+        try:
+            Chem.SanitizeMol(trial_mol)
+        except Exception:
+            continue
+
+        trial_obj = _charge_objective(trial_mol)
+        if trial_obj <= best_obj:
+            best = Chem.Mol(trial_mol)
+            best_obj = trial_obj
+
+    return best
+
+
+def _resolve_pnictogen_artifact_bonds(mol: Mol) -> Mol:
+    """Remove implausible oxygen-rich P-P single bonds when objective improves.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        Molecule to process.
+
+    Returns
+    -------
+    rdkit.Chem.rdchem.Mol
+        Best candidate after optional artifact-bond cleanup.
+    """
+    base = Chem.Mol(mol)
+    best = Chem.Mol(base)
+    best_obj = _charge_objective(best)
+
+    for bond in base.GetBonds():
+        if bond.GetBondType() != Chem.BondType.SINGLE:
+            continue
+
+        begin = bond.GetBeginAtom()
+        end = bond.GetEndAtom()
+        if begin.GetAtomicNum() != 15 or end.GetAtomicNum() != 15:
+            continue
+
+        b_o_neighbors = sum(
+            1
+            for nbr in begin.GetNeighbors()
+            if nbr.GetIdx() != end.GetIdx() and nbr.GetAtomicNum() == 8
+        )
+        e_o_neighbors = sum(
+            1
+            for nbr in end.GetNeighbors()
+            if nbr.GetIdx() != begin.GetIdx() and nbr.GetAtomicNum() == 8
+        )
+        if b_o_neighbors < 3 or e_o_neighbors < 3:
+            continue
+
+        b_other_neighbors = {
+            nbr.GetAtomicNum()
+            for nbr in begin.GetNeighbors()
+            if nbr.GetIdx() != end.GetIdx() and nbr.GetAtomicNum() != 8
+        }
+        e_other_neighbors = {
+            nbr.GetAtomicNum()
+            for nbr in end.GetNeighbors()
+            if nbr.GetIdx() != begin.GetIdx() and nbr.GetAtomicNum() != 8
+        }
+        if b_other_neighbors - {15} or e_other_neighbors - {15}:
+            continue
+
+        trial = Chem.RWMol(base)
+        trial.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+        trial_mol = trial.GetMol()
+        trial_mol.UpdatePropertyCache(strict=False)
+        trial_mol = _assign_formal_charges(trial_mol)
+        try:
+            Chem.SanitizeMol(trial_mol)
+        except Exception:
+            continue
+
+        trial_obj = _charge_objective(trial_mol)
+        if trial_obj <= best_obj:
+            best = Chem.Mol(trial_mol)
+            best_obj = trial_obj
+
+    return best
 
 
 def _promote_underbonded(mol: Mol) -> Mol:
@@ -2487,10 +2863,10 @@ def _assign_formal_charges(mol: Mol) -> Mol:
             atom.SetFormalCharge(0)
             continue
         bv = _bond_valence(atom)
-        best = _best_shell(atom, bv)
-        if best is None:
+        best_fc = _best_formal_charge(atom, bv)
+        if best_fc is None:
             continue
-        atom.SetFormalCharge(int(round(bv - best)))
+        atom.SetFormalCharge(best_fc)
 
         # Special-case tricoordinate carbocations (e.g., CCl3+):
         # if carbon is 3-connected, all bonds are single, and the default
@@ -2538,10 +2914,10 @@ def _assign_formal_charges_local(mol: Mol, atom_indices: Iterable[int]) -> Mol:
             atom.SetFormalCharge(0)
             continue
         bv = _bond_valence(atom)
-        best = _best_shell(atom, bv)
-        if best is None:
+        best_fc = _best_formal_charge(atom, bv)
+        if best_fc is None:
             continue
-        atom.SetFormalCharge(int(round(bv - best)))
+        atom.SetFormalCharge(best_fc)
         # Tricoordinate carbocation special case (mirrors _assign_formal_charges).
         if (
             atom.GetAtomicNum() == 6
@@ -2551,6 +2927,7 @@ def _assign_formal_charges_local(mol: Mol, atom_indices: Iterable[int]) -> Mol:
             and atom.GetTotalNumHs() == 0
         ):
             atom.SetFormalCharge(1)
+
     mol = _enforce_target_charge(mol)
     mol.UpdatePropertyCache(strict=False)
     return mol
@@ -2850,6 +3227,41 @@ def _restore_explicit_hydrogen_flags(mol: Mol) -> Mol:
     return rw.GetMol()
 
 
+def _retarget_bond_orders_rdkit(mol: Mol, charge: int) -> Mol | None:
+    """Attempt a target-charge bond-order re-perception with RDKit.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        Input molecule with connectivity.
+    charge : int
+        Target net charge.
+
+    Returns
+    -------
+    rdkit.Chem.rdchem.Mol or None
+        Sanitizable, target-charge-consistent molecule when successful.
+    """
+    try:
+        candidate = Chem.Mol(mol)
+        DetermineBondOrders(
+            candidate,
+            charge=int(charge),
+            maxIterations=800,
+            allowChargedFragments=True,
+        )
+        candidate.UpdatePropertyCache(strict=False)
+        candidate = _prepare_for_cleanup(candidate)
+        candidate = _fix_overvalenced(candidate)
+        candidate = _assign_formal_charges(candidate)
+        if sum(a.GetFormalCharge() for a in candidate.GetAtoms()) != int(charge):
+            return None
+        Chem.SanitizeMol(candidate)
+        return candidate
+    except Exception:
+        return None
+
+
 def _initial_bonding_rdkit(mol: Mol, charge: int | None = None) -> Mol:
     """Assign connectivity and bond orders using RDKit native perception.
 
@@ -2869,7 +3281,6 @@ def _initial_bonding_rdkit(mol: Mol, charge: int | None = None) -> Mol:
     """
     if charge is None:
         charge = 0
-    rdDetermineBonds.DetermineConnectivity(mol)
     DetermineBondOrders(
         mol,
         charge=charge,
@@ -2900,8 +3311,6 @@ def _initial_bonding_openbabel(mol: Mol, charge: int | None = None) -> Mol:
     ob_conversion.ReadString(ob_mol, Chem.MolToMolBlock(mol))
     if charge is not None:
         ob_mol.SetTotalCharge(charge)
-    ob_mol.ConnectTheDots()
-
     for _ in range(5):
         ob_mol.PerceiveBondOrders()
         ob_mol.FindRingAtomsAndBonds()

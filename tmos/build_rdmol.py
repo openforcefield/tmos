@@ -368,7 +368,7 @@ def qcelemental_to_rdkit(
 def xyz_to_rdkit(
     symbols: list[str],
     positions: np.ndarray,
-    distance_tolerance: float = 0.35,
+    distance_tolerance: float = 0.20,
     method: str = "openbabel",
     ignore_scale: bool = False,
 ) -> Mol:
@@ -383,8 +383,9 @@ def xyz_to_rdkit(
         Element symbols.
     positions : numpy.ndarray
         Matrix matching ``symbols`` with x, y, z coordinates in Å.
-    distance_tolerance : float, default=0.35
-        Additional tolerance (Å) for bond cutoffs in :func:`determine_connectivity`.
+    distance_tolerance : float, default=0.20
+        Additional tolerance (Å) above the covalent-radius sum for bond
+        detection in :func:`determine_connectivity`.
     method : str, default="openbabel"
         Connectivity method passed to :func:`determine_connectivity`.
     ignore_scale : bool, default=False
@@ -673,6 +674,57 @@ def _correct_sulfonate_phosphate_interaction(
     return block_bond_idx
 
 
+def _max_valence_for_connectivity(atomic_num: int, symbol: str) -> int:
+    """Return the maximum allowed bond count for an atom during connectivity assignment.
+
+    Transition metals are exempt (returns a large sentinel) so that their
+    coordination number is unrestricted by this heuristic.
+
+    Parameters
+    ----------
+    atomic_num : int
+        RDKit atomic number.
+    symbol : str
+        Element symbol.
+
+    Returns
+    -------
+    int
+        Maximum number of bonds the atom may form during connectivity detection.
+    """
+    if _is_transition_metal(symbol):
+        return 14  # effectively uncapped for TMs
+    vlist = [v for v in pt.GetValenceList(atomic_num) if v != -1]
+    return max(vlist) if vlist else 8
+
+
+def _is_valence_satisfied(degree: int, atomic_num: int, symbol: str) -> bool:
+    """Return True when *degree* matches a valid standard valence for the atom.
+
+    Used as a soft connectivity guard: if both endpoints of a candidate bond
+    are already at a satisfied standard valence, the bond is skipped (except
+    for transition metals, which are always considered unsatisfied).
+
+    Parameters
+    ----------
+    degree : int
+        Current number of bonds on the atom.
+    atomic_num : int
+        RDKit atomic number.
+    symbol : str
+        Element symbol.
+
+    Returns
+    -------
+    bool
+        ``True`` when degree is already a valid closed-shell valence count.
+    """
+    if _is_transition_metal(symbol):
+        return False
+    vlist = [v for v in pt.GetValenceList(atomic_num) if v != -1]
+    return degree in vlist
+
+
 def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> Mol:
     """Assign connectivity using RDKit native coordinate perception.
 
@@ -724,8 +776,17 @@ def _determine_connectivity_clean_up(
 
     Notes
     -----
-    - Transition metals are handled with a larger bonding threshold (scaled by 1.3).
-    - Atoms are considered bonded if their distance is between the minimum and maximum thresholds and no bond already exists.
+    - Transition metals are handled with a larger bonding threshold (scaled by 1.3)
+      and are exempt from the valence-based pruning rules below.
+    - **Rule 1 — hard cap**: a bond is rejected if it would bring either endpoint's
+      degree above its maximum standard valence (e.g. O capped at 2, H at 1).
+    - **Rule 2 — soft satisfied skip**: a bond is rejected when *both* endpoints
+      already sit at a valid standard valence (i.e. their running degree is already
+      in ``GetValenceList``).  This prevents spurious homoatomic bonds such as P-P
+      in phosphate cages where each P has three O-bonds (degree 3 ∈ {3, 5}) and
+      would otherwise accept further bonds up to its maximum of 5.
+    - Bonds are tested in index order (i < j); no sorting by distance is needed
+      because O-P bonds are consistently shorter than P-P bonds in practice.
     """
 
     mol = Chem.RWMol(rdkit_mol)
@@ -735,6 +796,7 @@ def _determine_connectivity_clean_up(
         conformer = mol.GetConformer()
 
     symbols = [a.GetSymbol() for a in mol.GetAtoms()]
+    atomic_nums = [a.GetAtomicNum() for a in mol.GetAtoms()]
     radii = np.array([_get_covalent_radius(sym) for sym in symbols])
     positions = np.array(
         [conformer.GetAtomPosition(i) for i in range(len(radii))], dtype=float
@@ -744,6 +806,13 @@ def _determine_connectivity_clean_up(
         a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
     ]
     metal_idx = metal_indices[0] if metal_indices else None
+
+    # Pre-compute per-atom valence metadata used by the two bond-pruning rules
+    max_valences = [
+        _max_valence_for_connectivity(an, sym) for an, sym in zip(atomic_nums, symbols)
+    ]
+    # Running degree counter (initially zero; updated as bonds are accepted)
+    degrees: list[int] = [0] * mol.GetNumAtoms()
 
     for i in range(mol.GetNumAtoms()):
         for j in range(i + 1, mol.GetNumAtoms()):
@@ -759,7 +828,23 @@ def _determine_connectivity_clean_up(
                 and distances[i, j] < max_bond_threshold
                 and mol.GetBondBetweenAtoms(i, j) is None
             ):
+                # Rule 1 — hard cap: neither atom may exceed its maximum valence.
+                if degrees[i] >= max_valences[i] or degrees[j] >= max_valences[j]:
+                    continue
+
+                # Rule 2 — soft satisfied skip: if *both* endpoints already sit at
+                # a standard closed-shell valence, the bond is almost certainly
+                # spurious (e.g. P-P in a phosphate cage where each P already has
+                # three O bonds and degree=3 is valid for P).  Transition-metal
+                # atoms are never considered satisfied so TM bonds are unaffected.
+                if _is_valence_satisfied(
+                    degrees[i], atomic_nums[i], symbols[i]
+                ) and _is_valence_satisfied(degrees[j], atomic_nums[j], symbols[j]):
+                    continue
+
                 mol.AddBond(i, j, Chem.BondType.SINGLE)
+                degrees[i] += 1
+                degrees[j] += 1
 
     if metal_idx is not None:
         for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
