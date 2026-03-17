@@ -814,37 +814,49 @@ def _determine_connectivity_clean_up(
     # Running degree counter (initially zero; updated as bonds are accepted)
     degrees: list[int] = [0] * mol.GetNumAtoms()
 
-    for i in range(mol.GetNumAtoms()):
-        for j in range(i + 1, mol.GetNumAtoms()):
+    # Collect all candidate (i, j) pairs that fall within bonding distance,
+    # then process them in ascending distance order.  This ensures that when
+    # an atom's valence cap is reached by Rule 1 the *closest* (most reliably
+    # real) bonds are retained while longer spurious connections are dropped —
+    # directly implementing the valence-based "fewer or equal connections"
+    # principle without relying on atom-index traversal order.
+    n = mol.GetNumAtoms()
+    candidate_pairs: list[tuple[float, int, int]] = []
+    for i in range(n):
+        for j in range(i + 1, n):
             one_is_tm: bool = _is_transition_metal(symbols[i]) or _is_transition_metal(
                 symbols[j]
             )
             factor: int = 2 if one_is_tm else 1
             max_bond_threshold = radii[i] + radii[j] + max_distance_tolerance * factor
             min_bond_threshold = radii[i] + radii[j] - min_distance_tolerance * factor
+            d = distances[i, j]
+            if min_bond_threshold < d < max_bond_threshold:
+                candidate_pairs.append((d, i, j))
+    # Short bonds first: when an atom's degree cap is hit, closest neighbours
+    # (which are almost always the genuine covalent bonds) are kept.
+    candidate_pairs.sort()
 
-            if (
-                distances[i, j] > min_bond_threshold
-                and distances[i, j] < max_bond_threshold
-                and mol.GetBondBetweenAtoms(i, j) is None
-            ):
-                # Rule 1 — hard cap: neither atom may exceed its maximum valence.
-                if degrees[i] >= max_valences[i] or degrees[j] >= max_valences[j]:
-                    continue
+    for d, i, j in candidate_pairs:
+        if mol.GetBondBetweenAtoms(i, j) is not None:
+            continue
+        # Rule 1 — hard cap: neither atom may exceed its maximum valence.
+        if degrees[i] >= max_valences[i] or degrees[j] >= max_valences[j]:
+            continue
 
-                # Rule 2 — soft satisfied skip: if *both* endpoints already sit at
-                # a standard closed-shell valence, the bond is almost certainly
-                # spurious (e.g. P-P in a phosphate cage where each P already has
-                # three O bonds and degree=3 is valid for P).  Transition-metal
-                # atoms are never considered satisfied so TM bonds are unaffected.
-                if _is_valence_satisfied(
-                    degrees[i], atomic_nums[i], symbols[i]
-                ) and _is_valence_satisfied(degrees[j], atomic_nums[j], symbols[j]):
-                    continue
+        # Rule 2 — soft satisfied skip: if *both* endpoints already sit at
+        # a standard closed-shell valence, the bond is almost certainly
+        # spurious (e.g. P-P in a phosphate cage where each P already has
+        # three O bonds and degree=3 is valid for P).  Transition-metal
+        # atoms are never considered satisfied so TM bonds are unaffected.
+        if _is_valence_satisfied(
+            degrees[i], atomic_nums[i], symbols[i]
+        ) and _is_valence_satisfied(degrees[j], atomic_nums[j], symbols[j]):
+            continue
 
-                mol.AddBond(i, j, Chem.BondType.SINGLE)
-                degrees[i] += 1
-                degrees[j] += 1
+        mol.AddBond(i, j, Chem.BondType.SINGLE)
+        degrees[i] += 1
+        degrees[j] += 1
 
     if metal_idx is not None:
         for idx in _correct_sulfonate_phosphate_interaction(mol, distances):

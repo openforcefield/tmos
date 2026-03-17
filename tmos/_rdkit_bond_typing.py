@@ -2881,6 +2881,11 @@ def _assign_formal_charges(mol: Mol) -> Mol:
         ):
             atom.SetFormalCharge(1)
 
+        if atom.GetNumRadicalElectrons() > 0:
+            implied_shell = int(round(bv)) - atom.GetFormalCharge()
+            if implied_shell in _valid_valences(atom):
+                atom.SetNumRadicalElectrons(0)
+
     mol = _enforce_target_charge(mol)
     mol.UpdatePropertyCache(strict=False)
     return mol
