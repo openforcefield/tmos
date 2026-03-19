@@ -369,7 +369,7 @@ def xyz_to_rdkit(
     symbols: list[str],
     positions: np.ndarray,
     distance_tolerance: float = 0.20,
-    method: str = "openbabel",
+    method: str = "custom",
     ignore_scale: bool = False,
 ) -> Mol:
     """Build an RDKit molecule from symbols and Cartesian coordinates.
@@ -386,8 +386,10 @@ def xyz_to_rdkit(
     distance_tolerance : float, default=0.20
         Additional tolerance (Å) above the covalent-radius sum for bond
         detection in :func:`determine_connectivity`.
-    method : str, default="openbabel"
+    method : str, default="custom"
         Connectivity method passed to :func:`determine_connectivity`.
+        ``"custom"`` uses the covalent-radius heuristic directly.
+        ``"rdkit"`` and ``"openbabel"`` are also accepted.
     ignore_scale : bool, default=False
         If True avoid an error when "H" is present and the minimum atomic distance is not between
         0.8 Å and 1.5 Å.
@@ -461,21 +463,23 @@ def xyz_to_rdkit(
 
 def determine_connectivity(
     rdkit_mol: Mol,
-    method: str = "rdkit",
-    clean_up: bool = True,
+    method: str = "custom",
     distance_tolerance: float = 0.2,
 ) -> Mol:
-    """Determine molecular connectivity, with optional metal-focused cleanup.
+    """Determine molecular connectivity.
 
     Parameters
     ----------
     rdkit_mol : rdkit.Chem.Mol
         RDKit molecule without bonds.
-    method : str, default="rdkit"
-        Method to use: ``"rdkit"``, ``"openbabel"``, or ``"None"``.
-    clean_up : bool, default=True
-        Optionally use special rules to determine bonds. Recommended for transition metals.
-        If ``method == None``, this is always ``False``.
+    method : str, default="custom"
+        Method to use:
+
+        - ``"custom"`` — standalone covalent-radius heuristic with valence
+          guards (see :func:`_determine_connectivity_custom`).  Default.
+        - ``"rdkit"`` — RDKit's built-in coordinate-based perception.
+        - ``"openbabel"`` — OpenBabel's ``ConnectTheDots`` perception.
+
     distance_tolerance : float, default=0.2
         Additional tolerance for bond distance cutoffs (Å).
 
@@ -496,22 +500,18 @@ def determine_connectivity(
     >>> # True
     """
     if method == "openbabel":
-        mol = _determine_connectivity_openbabel(rdkit_mol)
+        return _determine_connectivity_openbabel(rdkit_mol)
     elif method == "rdkit":
-        mol = _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
-    elif method == "None":
-        return rdkit_mol
-    else:
-        raise ValueError(
-            f"Connectivity method, {method}, is not supported. Must be: 'rdkit', 'openbabel', or None"
-        )
-
-    if clean_up:
-        return _determine_connectivity_clean_up(
+        return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
+    elif method == "custom":
+        return _determine_connectivity_custom(
             rdkit_mol, max_distance_tolerance=distance_tolerance
         )
     else:
-        return mol
+        raise ValueError(
+            f"Connectivity method, {method}, is not supported. Must be: "
+            "'rdkit', 'openbabel', or 'custom'"
+        )
 
 
 def _determine_connectivity_openbabel(rdkit_mol: Mol) -> Mol:
@@ -586,6 +586,18 @@ def _is_transition_metal(symbol: str) -> bool:
     return symbol in transition_metal_covalent_radii
 
 
+# Atomic numbers that commonly carry +1 formal charge in organic molecules.
+# These elements are allowed one bond beyond their neutral valence maximum
+# during connectivity detection (which runs before charge assignment).
+_CATIONIC_ATOMIC_NUMS: frozenset[int] = frozenset(
+    {
+        7,  # N  — ammonium, iminium  (neutral max 3 → allow 4)
+        15,  # P  — phosphonium         (neutral max 5 → allow 6)
+        16,  # S  — sulfonium           (neutral max 6 → allow 7)
+    }
+)
+
+
 def _correct_sulfonate_phosphate_interaction(
     mol: Mol,
     distances: np.ndarray,
@@ -657,14 +669,6 @@ def _correct_sulfonate_phosphate_interaction(
             ]
         )
 
-        # If connections are significantly closer to metal than the central atom, block it
-        # print(
-        #    atm.GetIdx(),
-        #    d_center,
-        #    [distances[metal_idx, a.GetIdx()] for b in atm.GetBonds() for a in [b.GetEndAtom(), b.GetBeginAtom()]], # if a.GetIdx() != atm.GetIdx()],
-        #    d_connections,
-        #    (d_center - d_connections) / d_center
-        # ) # NoteHere
         if (
             len(d_connections) > 0
             and np.max((d_center - d_connections) / d_center) > dist_frac
@@ -674,7 +678,10 @@ def _correct_sulfonate_phosphate_interaction(
     return block_bond_idx
 
 
-def _max_valence_for_connectivity(atomic_num: int, symbol: str) -> int:
+def _max_valence_for_connectivity(
+    atomic_num: int,
+    symbol: str,
+) -> int:
     """Return the maximum allowed bond count for an atom during connectivity assignment.
 
     Transition metals are exempt (returns a large sentinel) so that their
@@ -695,7 +702,12 @@ def _max_valence_for_connectivity(atomic_num: int, symbol: str) -> int:
     if _is_transition_metal(symbol):
         return 14  # effectively uncapped for TMs
     vlist = [v for v in pt.GetValenceList(atomic_num) if v != -1]
-    return max(vlist) if vlist else 8
+    base = max(vlist) if vlist else 12
+
+    # Allow one extra bond for elements that commonly carry +1 formal charge.
+    # Connectivity is assigned before bond typing / charge assignment, so we
+    # must be permissive enough to admit bonds that are valid under a +1 fc.
+    return base + 1 if atomic_num in _CATIONIC_ATOMIC_NUMS else base
 
 
 def _is_valence_satisfied(degree: int, atomic_num: int, symbol: str) -> bool:
@@ -744,16 +756,22 @@ def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> 
     return mol
 
 
-def _determine_connectivity_clean_up(
+def _determine_connectivity_custom(
     rdkit_mol: Mol,
     max_distance_tolerance: float = 0.2,
     min_distance_tolerance: float = 0.4,
 ) -> Mol:
-    """Determine connectivity using covalent-radius distance heuristics.
+    """Assign or refine connectivity using covalent-radius distance heuristics.
 
-    This function analyzes the 3D coordinates of atoms in an RDKit molecule and adds bonds between atoms
-    based on covalent radii and distance thresholds. It applies special rules for transition metals by
-    increasing the bonding threshold to better account for metal complexes.
+    Can be used as a standalone connectivity method (when the input molecule
+    has no bonds) or as a post-processing step after RDKit/OpenBabel detection.
+    When used standalone, the full bond graph is built from scratch using
+    covalent radii and the valence rules below.  When used as post-processing,
+    existing bonds seed the degree counters so the method augments/prunes the
+    prior graph rather than replacing it.
+
+    It applies special rules for transition metals by increasing the bonding
+    threshold to better account for metal complexes.
 
     Parameters
     ----------
@@ -776,17 +794,21 @@ def _determine_connectivity_clean_up(
 
     Notes
     -----
+        - Existing bonds from upstream methods (RDKit/OpenBabel) are preserved as
+            the starting graph and count toward valence limits.
     - Transition metals are handled with a larger bonding threshold (scaled by 1.3)
       and are exempt from the valence-based pruning rules below.
     - **Rule 1 — hard cap**: a bond is rejected if it would bring either endpoint's
-      degree above its maximum standard valence (e.g. O capped at 2, H at 1).
+      degree above its context-aware maximum valence.  For sulfur the cap is
+      dynamic: without any O neighbors S is limited to valence 2 (thioether/thiol);
+      each O neighbor unlocks the next hypervalent shell (1 O → 4, ≥2 O → 6).
+      Other elements use the static maximum from their valence list (e.g. O → 2,
+      H → 1).
     - **Rule 2 — soft satisfied skip**: a bond is rejected when *both* endpoints
       already sit at a valid standard valence (i.e. their running degree is already
       in ``GetValenceList``).  This prevents spurious homoatomic bonds such as P-P
       in phosphate cages where each P has three O-bonds (degree 3 ∈ {3, 5}) and
       would otherwise accept further bonds up to its maximum of 5.
-    - Bonds are tested in index order (i < j); no sorting by distance is needed
-      because O-P bonds are consistently shorter than P-P bonds in practice.
     """
 
     mol = Chem.RWMol(rdkit_mol)
@@ -807,11 +829,9 @@ def _determine_connectivity_clean_up(
     ]
     metal_idx = metal_indices[0] if metal_indices else None
 
-    # Pre-compute per-atom valence metadata used by the two bond-pruning rules
     max_valences = [
         _max_valence_for_connectivity(an, sym) for an, sym in zip(atomic_nums, symbols)
     ]
-    # Running degree counter (initially zero; updated as bonds are accepted)
     degrees: list[int] = [0] * mol.GetNumAtoms()
 
     # Collect all candidate (i, j) pairs that fall within bonding distance,

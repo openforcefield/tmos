@@ -1,11 +1,13 @@
+import networkx as nx
 import pytest
 from rdkit.Chem.rdmolfiles import MolFromSmiles
 import json
 from pathlib import Path
 
 import tmos.build_rdmol as build_rdmol
+from tmos.graph_mapping import mol_to_graph
 
-with open(Path(__file__).parent / "failing_structures.json") as f:
+with open(Path(__file__).parent / "error_check1.json") as f:
     TEST_CASES = json.load(f)
 
 OUTPUT_REFERENCE = [
@@ -129,6 +131,29 @@ def _ref_penalty(smiles: str) -> int:
     return build_rdmol.molecule_charge_penalty(mol)
 
 
+def _check_graph_consistent(rdmol, ref_smiles: str) -> None:
+    """Assert the heavy-atom graph of *rdmol* is isomorphic to the reference SMILES graph."""
+    ref_mol = MolFromSmiles(ref_smiles)
+    assert ref_mol is not None, f"Invalid reference SMILES: {ref_smiles}"
+
+    g_actual = mol_to_graph(rdmol, remove_hydrogens=True)
+    g_ref = mol_to_graph(ref_mol, remove_hydrogens=True)
+
+    n_actual, n_ref = g_actual.number_of_nodes(), g_ref.number_of_nodes()
+    assert (
+        n_actual == n_ref
+    ), f"Heavy-atom count mismatch: got {n_actual}, expected {n_ref}"
+
+    e_actual, e_ref = g_actual.number_of_edges(), g_ref.number_of_edges()
+    assert (
+        e_actual == e_ref
+    ), f"Heavy-atom bond count mismatch: got {e_actual}, expected {e_ref}"
+
+    node_match = nx.algorithms.isomorphism.categorical_node_match("symbol", None)
+    gm = nx.algorithms.isomorphism.GraphMatcher(g_actual, g_ref, node_match=node_match)
+    assert gm.is_isomorphic(), "Heavy-atom graph is not isomorphic to reference SMILES"
+
+
 assert len(TEST_CASES) == len(OUTPUT_REFERENCE)
 
 
@@ -151,7 +176,10 @@ def test_determine_bonds_penalty(
         case["coordinates"],
         ignore_scale=True,
     )
+
     rdmol = build_rdmol.determine_bonds(rdmol, charge=case["charge"])
+
+    _check_graph_consistent(rdmol, reference["smiles"])
 
     actual_penalty = build_rdmol.molecule_charge_penalty(rdmol)
     reference_penalty = _ref_penalty(reference["smiles"])
