@@ -1973,11 +1973,25 @@ class _GraphMoveEngine:
                     candidate = self._apply_relay_move(work, ab_idx, bc_idx, cd_idx)
                     if candidate is None:
                         continue
-                    candidate = self._prep_candidate(candidate)
+                    # Fast screen: reassign charges only for the relay endpoint
+                    # atoms (bond orders elsewhere are unchanged).  Full
+                    # _prep_candidate normalization is deferred until acceptance.
+                    b_ab = work.GetBondWithIdx(ab_idx)
+                    b_bc = work.GetBondWithIdx(bc_idx)
+                    b_cd = work.GetBondWithIdx(cd_idx)
+                    relay_atoms = {
+                        b_ab.GetBeginAtomIdx(),
+                        b_ab.GetEndAtomIdx(),
+                        b_bc.GetBeginAtomIdx(),
+                        b_bc.GetEndAtomIdx(),
+                        b_cd.GetBeginAtomIdx(),
+                        b_cd.GetEndAtomIdx(),
+                    }
+                    candidate = _assign_formal_charges_local(candidate, relay_atoms)
                     cand_obj = _charge_objective(candidate)
                     if cand_obj < best_obj:
                         best_obj = cand_obj
-                        best_mol = candidate
+                        best_mol = self._prep_candidate(candidate)
                     elif (
                         cand_obj == current_obj
                         and proximity_mol is None
@@ -1996,11 +2010,14 @@ class _GraphMoveEngine:
                     candidate = self._apply_path_move(work, path, first_delta)
                     if candidate is None:
                         continue
-                    candidate = self._prep_candidate(candidate)
+                    # Fast screen: local charge update for path atoms only
+                    # (same pattern as _best_path_move_between_pair).  Full
+                    # normalization is deferred until acceptance.
+                    candidate = _assign_formal_charges_local(candidate, set(path))
                     cand_obj = _charge_objective(candidate)
                     if cand_obj < best_obj:
                         best_obj = cand_obj
-                        best_mol = candidate
+                        best_mol = self._prep_candidate(candidate)
                         break
                     elif (
                         cand_obj == current_obj
