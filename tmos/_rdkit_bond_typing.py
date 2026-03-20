@@ -515,6 +515,45 @@ def _target_charge_delta(mol: Mol) -> int:
     return current - target
 
 
+def _bond_distance(conf, idx_a: int, idx_b: int) -> float:
+    """Return Euclidean distance between two atoms from one conformer."""
+    p0 = conf.GetAtomPosition(idx_a)
+    p1 = conf.GetAtomPosition(idx_b)
+    return float(np.linalg.norm(np.array([p1.x - p0.x, p1.y - p0.y, p1.z - p0.z])))
+
+
+def _trial_after_bond_removal(mol: Mol, idx_a: int, idx_b: int) -> Mol:
+    """Return a trial molecule after removing one bond and refreshing cache."""
+    trial_rw = Chem.RWMol(mol)
+    trial_rw.RemoveBond(idx_a, idx_b)
+    trial = trial_rw.GetMol()
+    trial.UpdatePropertyCache(strict=False)
+    return trial
+
+
+def _try_sanitize_or_none(mol: Mol) -> Mol | None:
+    """Return molecule if sanitization succeeds, else ``None``."""
+    try:
+        Chem.SanitizeMol(mol)
+        return mol
+    except Exception:
+        return None
+
+
+def _assign_and_sanitize_or_none(mol: Mol) -> Mol | None:
+    """Assign formal charges and return sanitizable candidate, if any."""
+    return _try_sanitize_or_none(_assign_formal_charges(Chem.Mol(mol)))
+
+
+def _repair_overvalence_and_reassign(mol: Mol) -> Mol:
+    """Fix over-valence when present, then refresh formal charges."""
+    repaired = Chem.Mol(mol)
+    if _has_overvalenced_atoms(repaired):
+        repaired = _fix_overvalenced(repaired)
+        repaired = _assign_formal_charges(repaired)
+    return repaired
+
+
 def _enforce_target_charge(mol: Mol) -> Mol:
     """Adjust formal charges to match molecule property ``_target_charge``.
 
@@ -1846,34 +1885,21 @@ class _GraphMoveEngine:
             Sanitized molecule when possible.
         """
 
-        def _sanitize_or_none(candidate: Mol) -> Mol | None:
-            try:
-                Chem.SanitizeMol(candidate)
-                return candidate
-            except Exception:
-                return None
-
         # Fast path: no structural edits, only formal-charge assignment.
-        candidate = _assign_formal_charges(Chem.Mol(mol))
-        sanitized = _sanitize_or_none(candidate)
+        sanitized = _assign_and_sanitize_or_none(mol)
         if sanitized is not None:
             return sanitized
 
         # Repair path: demote over-valence first, then reassign charges.
-        repaired = Chem.Mol(candidate)
-        if _has_overvalenced_atoms(repaired):
-            repaired = _fix_overvalenced(repaired)
-        repaired = _assign_formal_charges(repaired)
-        sanitized = _sanitize_or_none(repaired)
+        repaired = _repair_overvalence_and_reassign(mol)
+        sanitized = _assign_and_sanitize_or_none(repaired)
         if sanitized is not None:
             return sanitized
 
         # Last resort: remove radicals, then repeat valence repair.
         cleaned = _strip_radicals_and_reassign(Chem.Mol(mol))
-        if _has_overvalenced_atoms(cleaned):
-            cleaned = _fix_overvalenced(cleaned)
-        cleaned = _assign_formal_charges(cleaned)
-        return _sanitize_or_none(cleaned)
+        cleaned = _repair_overvalence_and_reassign(cleaned)
+        return _assign_and_sanitize_or_none(cleaned)
 
     @staticmethod
     def _kekulized_or_none(mol: Mol) -> Mol | None:
@@ -2052,11 +2078,9 @@ class _GraphMoveEngine:
             seen_states.add(state)
             sanitized = cls._sanitize_candidate_or_none(candidate)
             if sanitized is None:
-                sanitized = _strip_radicals_and_reassign(candidate)
-                try:
-                    Chem.SanitizeMol(sanitized)
-                except Exception:
-                    sanitized = None
+                sanitized = _try_sanitize_or_none(
+                    _strip_radicals_and_reassign(candidate)
+                )
             if sanitized is None:
                 continue
             objective = _charge_objective(sanitized)
@@ -2071,46 +2095,38 @@ class _GraphMoveEngine:
         if best_candidate is not None:
             forced = cls._force_charge_balance(best_candidate)
             if _target_charge_delta(forced) == 0:
-                try:
-                    Chem.SanitizeMol(forced)
-                    return forced
-                except Exception:
-                    # Over-valence artefact from charge adjustment — demote and retry.
-                    forced = _fix_overvalenced(forced)
-                    forced = _assign_formal_charges(forced)
-                    try:
-                        Chem.SanitizeMol(forced)
-                        return forced
-                    except Exception:
-                        pass
-            try:
-                Chem.SanitizeMol(forced)
-                return forced
-            except Exception:
-                fixed = _fix_overvalenced(Chem.Mol(best_candidate))
-                fixed = _assign_formal_charges(fixed)
-                try:
-                    Chem.SanitizeMol(fixed)
-                    return fixed
-                except Exception:
-                    return best_candidate
+                sanitized_forced = _try_sanitize_or_none(Chem.Mol(forced))
+                if sanitized_forced is not None:
+                    return sanitized_forced
+
+                # Over-valence artefact from charge adjustment — demote and retry.
+                forced = _repair_overvalence_and_reassign(forced)
+                sanitized_forced = _try_sanitize_or_none(Chem.Mol(forced))
+                if sanitized_forced is not None:
+                    return sanitized_forced
+
+            sanitized_forced = _try_sanitize_or_none(Chem.Mol(forced))
+            if sanitized_forced is not None:
+                return sanitized_forced
+
+            fixed = _repair_overvalence_and_reassign(Chem.Mol(best_candidate))
+            sanitized_fixed = _try_sanitize_or_none(fixed)
+            if sanitized_fixed is not None:
+                return sanitized_fixed
+            return best_candidate
 
         partial = _prepare_for_cleanup(Chem.Mol(mol))
         partial = _strip_radicals_and_reassign(partial)
-        if _has_overvalenced_atoms(partial):
-            partial = _fix_overvalenced(partial)
-            partial = _assign_formal_charges(partial)
-        try:
-            Chem.SanitizeMol(partial)
-            return partial
-        except Exception:
-            fallback = _fix_overvalenced(Chem.Mol(partial))
-            fallback = _assign_formal_charges(fallback)
-            try:
-                Chem.SanitizeMol(fallback)
-                return fallback
-            except Exception:
-                return fallback
+        partial = _repair_overvalence_and_reassign(partial)
+        sanitized_partial = _try_sanitize_or_none(Chem.Mol(partial))
+        if sanitized_partial is not None:
+            return sanitized_partial
+
+        fallback = _repair_overvalence_and_reassign(Chem.Mol(partial))
+        sanitized_fallback = _try_sanitize_or_none(Chem.Mol(fallback))
+        if sanitized_fallback is not None:
+            return sanitized_fallback
+        return fallback
 
     @classmethod
     def _path_lookahead_first_improvement(
@@ -2509,6 +2525,174 @@ class _GraphMoveEngine:
         return final
 
 
+def _score_structure_for_cleanup(candidate_struct: Mol) -> Objective:
+    """Return cleanup objective after lightweight retyping on a trial structure."""
+    probe = Chem.Mol(candidate_struct)
+    probe.UpdatePropertyCache(strict=False)
+    probe = _assign_formal_charges(probe)
+    probe = _reduce_charge_by_bond_promotion(probe)
+    return _charge_objective(probe)
+
+
+def _secondary_cleanup_features(
+    mol: Mol,
+) -> tuple[dict[int, int], dict[int, int], dict[int, bool]]:
+    """Return per-atom features used by secondary overvalence cleanup.
+
+    Returns
+    -------
+    tuple
+        ``(heavy_degree, oxygen_neighbor_total, has_hetero_neighbor)`` maps.
+    """
+    heavy_degree: dict[int, int] = {}
+    oxygen_total: dict[int, int] = {}
+    has_hetero_neighbor: dict[int, bool] = {}
+
+    for atom in mol.GetAtoms():
+        idx = atom.GetIdx()
+        nbrs = list(atom.GetNeighbors())
+        heavy_degree[idx] = sum(1 for nbr in nbrs if nbr.GetAtomicNum() != 1)
+        oxygen_total[idx] = sum(1 for nbr in nbrs if nbr.GetAtomicNum() == 8)
+        has_hetero_neighbor[idx] = any(nbr.GetAtomicNum() not in (1, 6) for nbr in nbrs)
+
+    return heavy_degree, oxygen_total, has_hetero_neighbor
+
+
+def _is_secondary_cleanup_candidate(ai: Atom, aj: Atom, bond: Bond) -> bool:
+    """Return ``True`` if this heavy-atom single bond is eligible for pruning."""
+    if ai.GetAtomicNum() == 1 or aj.GetAtomicNum() == 1:
+        return False
+    if bond.GetBondType() != Chem.BondType.SINGLE:
+        return False
+
+    z_i = ai.GetAtomicNum()
+    z_j = aj.GetAtomicNum()
+
+    # Preserve most ring bonds unless chemistry suggests a likely closure artefact.
+    if bond.IsInRing() and not ({z_i, z_j} & {15, 16}) and not (z_i == 6 and z_j == 6):
+        return False
+
+    return True
+
+
+def _secondary_cleanup_stretch_cutoff(
+    z_i: int,
+    z_j: int,
+    bond_in_ring: bool,
+    hetero_nbr_i: bool,
+    hetero_nbr_j: bool,
+    oxygen_i_excl: int,
+    oxygen_j_excl: int,
+    heavy_i_excl: int,
+    heavy_j_excl: int,
+) -> tuple[float, bool, bool]:
+    """Return adaptive stretch cutoff and bridge flags for one bond candidate."""
+    stretch_cutoff = 0.10
+    oxygen_rich_ps_bridge = False
+    hypercoord_pp_bridge = False
+
+    if z_i == 6 and z_j == 6:
+        stretch_cutoff = 0.16
+        if bond_in_ring and hetero_nbr_i and hetero_nbr_j:
+            stretch_cutoff = 0.12
+
+    if {z_i, z_j}.issubset({15, 16}) and oxygen_i_excl >= 2 and oxygen_j_excl >= 2:
+        oxygen_rich_ps_bridge = True
+        stretch_cutoff = 0.00
+
+    if z_i == 15 and z_j == 15 and heavy_i_excl >= 3 and heavy_j_excl >= 3:
+        hypercoord_pp_bridge = True
+        stretch_cutoff = min(stretch_cutoff, 0.03)
+
+    return stretch_cutoff, oxygen_rich_ps_bridge, hypercoord_pp_bridge
+
+
+def _collect_secondary_stretched_candidates(
+    mol: Mol,
+    heavy_degree: dict[int, int],
+    oxygen_total: dict[int, int],
+    has_hetero_nbr: dict[int, bool],
+    conf,
+) -> list[tuple[float, int, int, float, bool, bool]]:
+    """Collect stretched heavy-atom single-bond candidates for secondary cleanup."""
+    stretched: list[tuple[float, int, int, float, bool, bool]] = []
+    if conf is None:
+        return stretched
+
+    for bond in mol.GetBonds():
+        i = bond.GetBeginAtomIdx()
+        j = bond.GetEndAtomIdx()
+        ai = mol.GetAtomWithIdx(i)
+        aj = mol.GetAtomWithIdx(j)
+        if not _is_secondary_cleanup_candidate(ai, aj, bond):
+            continue
+
+        if heavy_degree[i] < 2 or heavy_degree[j] < 2:
+            continue
+
+        z_i = ai.GetAtomicNum()
+        z_j = aj.GetAtomicNum()
+
+        dist = _bond_distance(conf, i, j)
+        rsum = float(pt.GetRcovalent(z_i) + pt.GetRcovalent(z_j))
+        stretch = dist - rsum
+
+        oxygen_i_excl = oxygen_total[i] - (1 if z_j == 8 else 0)
+        oxygen_j_excl = oxygen_total[j] - (1 if z_i == 8 else 0)
+        heavy_i_excl = heavy_degree[i] - (1 if z_j != 1 else 0)
+        heavy_j_excl = heavy_degree[j] - (1 if z_i != 1 else 0)
+
+        stretch_cutoff, oxygen_rich_ps_bridge, hypercoord_pp_bridge = (
+            _secondary_cleanup_stretch_cutoff(
+                z_i,
+                z_j,
+                bond.IsInRing(),
+                has_hetero_nbr[i],
+                has_hetero_nbr[j],
+                oxygen_i_excl,
+                oxygen_j_excl,
+                heavy_i_excl,
+                heavy_j_excl,
+            )
+        )
+        if stretch <= stretch_cutoff:
+            continue
+
+        stretched.append(
+            (stretch, i, j, dist, oxygen_rich_ps_bridge, hypercoord_pp_bridge)
+        )
+
+    return stretched
+
+
+def _evaluate_secondary_bond_removal(
+    mol: Mol,
+    idx_a: int,
+    idx_b: int,
+    dist: float,
+    best_obj: Objective,
+    oxygen_rich_ps_bridge: bool,
+    hypercoord_pp_bridge: bool,
+) -> tuple[Objective, float, int, int] | None:
+    """Return accepted trial update for one secondary bond-removal candidate."""
+    trial = _trial_after_bond_removal(mol, idx_a, idx_b)
+
+    # Skip removals that immediately create an obviously over-valenced
+    # structure under temporary charge assignment.
+    probe = _assign_formal_charges(Chem.Mol(trial))
+    if _has_overvalenced_atoms(probe):
+        return None
+
+    trial_obj = _score_structure_for_cleanup(trial)
+    keep_if_non_worse = (
+        oxygen_rich_ps_bridge or hypercoord_pp_bridge
+    ) and trial_obj <= best_obj
+    if trial_obj < best_obj or keep_if_non_worse:
+        return (trial_obj, dist, idx_a, idx_b)
+
+    return None
+
+
 def _fix_overvalenced(mol: Mol) -> Mol:
     """Demote or remove bonds so each atom stays within allowed charge/valence.
 
@@ -2619,134 +2803,62 @@ def _fix_overvalenced(mol: Mol) -> Mol:
     # end while-changed
 
     mol.UpdatePropertyCache(strict=False)
-    return mol.GetMol()
 
+    # Secondary bounded pass: remove only stretched heavy-atom single bonds when
+    # doing so improves the downstream chemistry objective after charge/bond
+    # reassignment.
+    best_struct = mol.GetMol()
+    best_struct.UpdatePropertyCache(strict=False)
 
-def _resolve_oxygen_oxygen_artifacts(mol: Mol) -> Mol:
-    """Remove implausible O-O single bonds near P/S when objective improves.
+    best_obj = _score_structure_for_cleanup(best_struct)
 
-    Parameters
-    ----------
-    mol : rdkit.Chem.rdchem.Mol
-        Molecule to process.
-
-    Returns
-    -------
-    rdkit.Chem.rdchem.Mol
-        Best candidate after optional O-O cleanup.
-    """
-    base = Chem.Mol(mol)
-    best = Chem.Mol(base)
-    best_obj = _charge_objective(best)
-
-    for bond in base.GetBonds():
-        if bond.GetBondType() != Chem.BondType.SINGLE:
-            continue
-
-        begin = bond.GetBeginAtom()
-        end = bond.GetEndAtom()
-        if begin.GetAtomicNum() != 8 or end.GetAtomicNum() != 8:
-            continue
-
-        b_neighbors = [
-            nbr.GetAtomicNum()
-            for nbr in begin.GetNeighbors()
-            if nbr.GetIdx() != end.GetIdx()
-        ]
-        e_neighbors = [
-            nbr.GetAtomicNum()
-            for nbr in end.GetNeighbors()
-            if nbr.GetIdx() != begin.GetIdx()
-        ]
-        if not any(z in (15, 16) for z in b_neighbors + e_neighbors):
-            continue
-
-        trial = Chem.RWMol(base)
-        trial.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-        trial_mol = trial.GetMol()
-        trial_mol.UpdatePropertyCache(strict=False)
-        trial_mol = _assign_formal_charges(trial_mol)
-        try:
-            Chem.SanitizeMol(trial_mol)
-        except Exception:
-            continue
-
-        trial_obj = _charge_objective(trial_mol)
-        if trial_obj <= best_obj:
-            best = Chem.Mol(trial_mol)
-            best_obj = trial_obj
-
-    return best
-
-
-def _resolve_pnictogen_artifact_bonds(mol: Mol) -> Mol:
-    """Remove implausible oxygen-rich P-P single bonds when objective improves.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.rdchem.Mol
-        Molecule to process.
-
-    Returns
-    -------
-    rdkit.Chem.rdchem.Mol
-        Best candidate after optional artifact-bond cleanup.
-    """
-    base = Chem.Mol(mol)
-    best = Chem.Mol(base)
-    best_obj = _charge_objective(best)
-
-    for bond in base.GetBonds():
-        if bond.GetBondType() != Chem.BondType.SINGLE:
-            continue
-
-        begin = bond.GetBeginAtom()
-        end = bond.GetEndAtom()
-        if begin.GetAtomicNum() != 15 or end.GetAtomicNum() != 15:
-            continue
-
-        b_o_neighbors = sum(
-            1
-            for nbr in begin.GetNeighbors()
-            if nbr.GetIdx() != end.GetIdx() and nbr.GetAtomicNum() == 8
+    for _ in range(2):
+        heavy_degree, oxygen_total, has_hetero_nbr = _secondary_cleanup_features(
+            best_struct
         )
-        e_o_neighbors = sum(
-            1
-            for nbr in end.GetNeighbors()
-            if nbr.GetIdx() != begin.GetIdx() and nbr.GetAtomicNum() == 8
+        conf_best = (
+            best_struct.GetConformer() if best_struct.GetNumConformers() > 0 else None
         )
-        if b_o_neighbors < 3 or e_o_neighbors < 3:
-            continue
+        candidate_updates: list[tuple[Objective, float, int, int]] = []
 
-        b_other_neighbors = {
-            nbr.GetAtomicNum()
-            for nbr in begin.GetNeighbors()
-            if nbr.GetIdx() != end.GetIdx() and nbr.GetAtomicNum() != 8
-        }
-        e_other_neighbors = {
-            nbr.GetAtomicNum()
-            for nbr in end.GetNeighbors()
-            if nbr.GetIdx() != begin.GetIdx() and nbr.GetAtomicNum() != 8
-        }
-        if b_other_neighbors - {15} or e_other_neighbors - {15}:
-            continue
+        # Gather candidate stretched single bonds and evaluate only the most
+        # suspicious ones for speed.
+        stretched = _collect_secondary_stretched_candidates(
+            best_struct,
+            heavy_degree,
+            oxygen_total,
+            has_hetero_nbr,
+            conf_best,
+        )
 
-        trial = Chem.RWMol(base)
-        trial.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-        trial_mol = trial.GetMol()
-        trial_mol.UpdatePropertyCache(strict=False)
-        trial_mol = _assign_formal_charges(trial_mol)
-        try:
-            Chem.SanitizeMol(trial_mol)
-        except Exception:
-            continue
+        if not stretched:
+            break
 
-        trial_obj = _charge_objective(trial_mol)
-        if trial_obj <= best_obj:
-            best = Chem.Mol(trial_mol)
-            best_obj = trial_obj
+        stretched.sort(reverse=True)
+        for _, i, j, dist, oxygen_rich_ps_bridge, hypercoord_pp_bridge in stretched[:8]:
+            evaluated = _evaluate_secondary_bond_removal(
+                best_struct,
+                i,
+                j,
+                dist,
+                best_obj,
+                oxygen_rich_ps_bridge,
+                hypercoord_pp_bridge,
+            )
+            if evaluated is not None:
+                candidate_updates.append(evaluated)
 
-    return best
+        if not candidate_updates:
+            break
+
+        # Prefer best objective first, then longer bond as weakest-link tie-breaker.
+        candidate_updates.sort(key=lambda x: (x[0], -x[1]))
+        chosen_obj, _, idx_a, idx_b = candidate_updates[0]
+        best_struct = _trial_after_bond_removal(best_struct, idx_a, idx_b)
+        best_obj = chosen_obj
+
+    best_struct.UpdatePropertyCache(strict=False)
+    return best_struct
 
 
 def _promote_underbonded(mol: Mol) -> Mol:
@@ -3022,9 +3134,7 @@ def _reduce_charge_by_bond_promotion(mol: Mol) -> Mol:
         is_negative: int = 0 if atom.GetFormalCharge() < 0 else 1
         if conf is None:
             return (is_negative, ep, 0.0)
-        p0 = conf.GetAtomPosition(center_idx)
-        p1 = conf.GetAtomPosition(atom.GetIdx())
-        dist = float(np.linalg.norm(np.array([p1.x - p0.x, p1.y - p0.y, p1.z - p0.z])))
+        dist = _bond_distance(conf, center_idx, atom.GetIdx())
         return (is_negative, ep, dist)
 
     changed = True
@@ -3399,10 +3509,41 @@ def determine_bonds(
     with _time_stage("initial_bonding"):
         mol = backend(mol, charge)
     mol.UpdatePropertyCache(strict=False)
+    initial_bonded = Chem.Mol(mol)
 
     if custom_cleanup:
         with _time_stage("cleanup_best"):
             mol = _GraphMoveEngine.cleanup_best(mol, max_rounds=cleanup_max_iters)
+        # If cleanup converges to a charged/charge-mismatched local minimum,
+        # try a bounded RDKit re-perception from both current and initial seeds
+        # and keep only objective-improving candidates.
+        target_for_retarget = (
+            int(charge)
+            if charge is not None
+            else sum(a.GetFormalCharge() for a in mol.GetAtoms())
+        )
+        needs_retarget = molecule_charge_penalty(mol) > 0 or (
+            charge is not None
+            and sum(a.GetFormalCharge() for a in mol.GetAtoms()) != int(charge)
+        )
+        if needs_retarget:
+            with _time_stage("retarget_after_cleanup"):
+                best = Chem.Mol(mol)
+                best_obj = _charge_objective(best)
+                for seed in (Chem.Mol(mol), Chem.Mol(initial_bonded)):
+                    trial = _retarget_bond_orders_rdkit(seed, target_for_retarget)
+                    if trial is None:
+                        continue
+                    if charge is not None and (
+                        sum(a.GetFormalCharge() for a in trial.GetAtoms())
+                        != int(charge)
+                    ):
+                        continue
+                    trial_obj = _charge_objective(trial)
+                    if trial_obj < best_obj:
+                        best = trial
+                        best_obj = trial_obj
+                mol = best
         if (
             charge is not None
             and sum([a.GetFormalCharge() for a in mol.GetAtoms()]) != charge
