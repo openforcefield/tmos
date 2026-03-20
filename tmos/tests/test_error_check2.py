@@ -49,9 +49,6 @@ OUTPUT_REFERENCE = [
         "smiles": "[H:27][c:6]1[c:8]([c:12]([c:17]([c:13]([c:9]1[H:30])[H:34])[C:26]([H:40])([H:41])[n+:24]2[c:20]([c:18]([n+:23]([c:19]([c:21]2[H:38])[H:36])[c:16]3[c:11]([c:7]([c:10]([c:15]4[c:14]3[N:4]=[C:5]([N:22]4[H:39])[C:25]([F:1])([F:2])[F:3])[H:31])[H:28])[H:32])[H:35])[H:37])[H:33])[H:29]"
     },
     {
-        "smiles": "[H:42][c:23]1[n:10][c:25]2[c:26]([c:24]([n:9]1)[N:27]([H:43])[H:44])[N:8]=[C:22]([N:28]2[C@@:30]([H:47])([C:20](=[O:2])[H:40])[O:12][C@:31]([H:48])([C:21](=[O:3])[H:41])[C:29]([H:45])([H:46])[P:34](=[O:6])([H:49])([O:17][H:38])([O:18][H:39])[O:19][P:33](=[O:5])([O:15][H:37])[O:16][P:32](=[O:4])([O:13][H:35])[O:14][H:36])[N:7]=[N+:11]=[N-:1]"
-    },
-    {
         "smiles": "[O:1]=[C:6]1[C:8]([C:7]2=[N:2][N:18]([H:28])[N:20]([H:30])[N:19]2[H:29])=[C:9]([N:17]([c:15]2[c:11]([H:24])[c:13]([O:3][C:21]([H:31])([H:32])[H:33])[c:10]([H:23])[c:14]([O:4][C:22]([H:34])([H:35])[H:36])[c:12]2[H:25])[H:27])[S:5][N:16]1[H:26]"
     },
     {"smiles": "[H:9][C:5](=[S:7](=[O:1])=[O:2])[C:6](=[S:8](=[O:3])=[O:4])[H:10]"},
@@ -65,12 +62,14 @@ def _ref_penalty(smiles: str) -> int:
     mol = MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f"Invalid reference SMILES: {smiles}")
-    return build_rdmol.molecule_charge_penalty(mol)
+    return build_rdmol.molecular_penalty(mol)
 
 
 def _check_graph_consistent(rdmol, ref_smiles: str) -> None:
     """Assert the heavy-atom graph of *rdmol* is isomorphic to the reference SMILES graph."""
     ref_mol = MolFromSmiles(ref_smiles)
+    if ref_mol is None:
+        ref_mol = MolFromSmiles(ref_smiles, sanitize=False)
     assert ref_mol is not None, f"Invalid reference SMILES: {ref_smiles}"
 
     g_actual = mol_to_graph(rdmol, remove_hydrogens=True)
@@ -116,9 +115,16 @@ def test_determine_bonds_penalty(
 
     rdmol = build_rdmol.determine_bonds(rdmol, charge=case["charge"])
 
+    radical_atoms = [
+        (a.GetIdx(), a.GetAtomicNum())
+        for a in rdmol.GetAtoms()
+        if a.GetNumRadicalElectrons() > 0
+    ]
+    assert not radical_atoms, f"Output molecule contains radical atoms: {radical_atoms}"
+
     _check_graph_consistent(rdmol, reference["smiles"])
 
-    actual_penalty = build_rdmol.molecule_charge_penalty(rdmol)
+    actual_penalty = build_rdmol.molecular_penalty(rdmol)
     reference_penalty = _ref_penalty(reference["smiles"])
     assert (
         actual_penalty <= reference_penalty

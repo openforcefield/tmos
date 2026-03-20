@@ -505,7 +505,7 @@ def _ref_penalty(smiles: str) -> int:
     mol = MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f"Invalid reference SMILES: {smiles}")
-    return build_rdmol.molecule_charge_penalty(mol)
+    return build_rdmol.molecular_penalty(mol)
 
 
 ref_penalties = [_ref_penalty(r["smiles"]) for r in output_reference]
@@ -530,7 +530,14 @@ def test_determine_bonds_penalty_and_runtime(
     rdmol = build_rdmol.determine_bonds(rdmol, charge=case["charge"])
     elapsed = time.perf_counter() - start_time
 
-    actual_penalty = build_rdmol.molecule_charge_penalty(rdmol)
+    radical_atoms = [
+        (a.GetIdx(), a.GetAtomicNum())
+        for a in rdmol.GetAtoms()
+        if a.GetNumRadicalElectrons() > 0
+    ]
+    assert not radical_atoms, f"Output molecule contains radical atoms: {radical_atoms}"
+
+    actual_penalty = build_rdmol.molecular_penalty(rdmol)
     assert (
         actual_penalty <= reference_penalty
     ), f"Penalty increased: {actual_penalty} > {reference_penalty}"

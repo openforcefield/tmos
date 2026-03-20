@@ -128,12 +128,14 @@ def _ref_penalty(smiles: str) -> int:
     mol = MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f"Invalid reference SMILES: {smiles}")
-    return build_rdmol.molecule_charge_penalty(mol)
+    return build_rdmol.molecular_penalty(mol)
 
 
 def _check_graph_consistent(rdmol, ref_smiles: str) -> None:
     """Assert the heavy-atom graph of *rdmol* is isomorphic to the reference SMILES graph."""
     ref_mol = MolFromSmiles(ref_smiles)
+    if ref_mol is None:
+        ref_mol = MolFromSmiles(ref_smiles, sanitize=False)
     assert ref_mol is not None, f"Invalid reference SMILES: {ref_smiles}"
 
     g_actual = mol_to_graph(rdmol, remove_hydrogens=True)
@@ -179,9 +181,16 @@ def test_determine_bonds_penalty(
 
     rdmol = build_rdmol.determine_bonds(rdmol, charge=case["charge"])
 
+    radical_atoms = [
+        (a.GetIdx(), a.GetAtomicNum())
+        for a in rdmol.GetAtoms()
+        if a.GetNumRadicalElectrons() > 0
+    ]
+    assert not radical_atoms, f"Output molecule contains radical atoms: {radical_atoms}"
+
     _check_graph_consistent(rdmol, reference["smiles"])
 
-    actual_penalty = build_rdmol.molecule_charge_penalty(rdmol)
+    actual_penalty = build_rdmol.molecular_penalty(rdmol)
     reference_penalty = _ref_penalty(reference["smiles"])
     assert (
         actual_penalty <= reference_penalty
