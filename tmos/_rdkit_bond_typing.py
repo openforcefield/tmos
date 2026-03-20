@@ -2362,8 +2362,8 @@ class _GraphMoveEngine:
     def _path_lookahead_charge_gap(
         cls,
         mol: Mol,
-        max_candidates: int = 8,
-        max_path_len: int = 8,
+        max_candidates: int = 20,
+        max_path_len: int = 15,
     ) -> Mol | None:
         """Find a path move that reduces the target-charge gap.
 
@@ -2385,9 +2385,9 @@ class _GraphMoveEngine:
         ----------
         mol : rdkit.Chem.rdchem.Mol
             Molecule after ``_assign_formal_charges``.
-        max_candidates : int, default=8
+        max_candidates : int, default=20
             Maximum candidate source atoms to inspect.
-        max_path_len : int, default=8
+        max_path_len : int, default=15
             Maximum path length to search.
 
         Returns
@@ -2400,10 +2400,13 @@ class _GraphMoveEngine:
             return None
 
         # Candidate atoms: neutral N or P where one extra bond valence
-        # would naturally yield fc=+1 via _best_formal_charge.
+        # would naturally yield fc=+1 via _best_formal_charge.  Restrict to
+        # N and P only — C atoms at bv=4 also technically pass the test but
+        # C+ is heavily penalised and pollutes the candidate list, pushing the
+        # real N/P cation sites beyond the max_candidates cut-off.
         candidates: list[int] = []
         for atom in mol.GetAtoms():
-            if atom.GetAtomicNum() in (0, 1):
+            if atom.GetAtomicNum() not in (7, 15):
                 continue
             if atom.GetFormalCharge() != 0 or atom.GetNumRadicalElectrons() != 0:
                 continue

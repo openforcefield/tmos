@@ -35,11 +35,11 @@ from .reference_values import (
     transition_metal_covalent_radii,
     METALS_NUM,
 )
-from tmos._rdkit_bond_typing import determine_bonds, molecule_charge_penalty
+from tmos._rdkit_bond_typing import determine_bonds, molecular_penalty
 
 __all__: list[str] = [
     "determine_bonds",
-    "molecule_charge_penalty",
+    "molecular_penalty",
     "assess_atoms",
     "get_atom_charge",
     "update_formal_charges",
