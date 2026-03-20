@@ -7,7 +7,7 @@ custom cleanup logic to resolve common over-valence/charge assignment artifacts.
 Public API
 ----------
 - ``determine_bonds``: assign connectivity, bond orders, and formal charges.
-- ``molecule_charge_penalty``: score formal-charge placement for optimization.
+- ``molecular_penalty``: score formal-charge and radical placement for optimization.
 """
 
 import contextlib
@@ -418,8 +418,13 @@ def _has_overvalenced_atoms(mol: Mol) -> bool:
     return False
 
 
-def molecule_charge_penalty(mol: Mol) -> int:
-    """Return element-aware formal-charge penalty for a molecule.
+def molecular_penalty(mol: Mol) -> int:
+    """Return element-aware molecular penalty for a molecule.
+
+    Penalizes both formal-charge placement and radical electrons.  Radical
+    atoms receive a large penalty (20 000 × radical count) so the optimizer
+    strongly prefers radical-free states.  A fully neutral, radical-free
+    molecule scores zero.
 
     Parameters
     ----------
@@ -429,15 +434,15 @@ def molecule_charge_penalty(mol: Mol) -> int:
     Returns
     -------
     int
-        Lower values indicate preferred charge localization.
-
-    Lower values indicate more preferred charge localization.
-    This score only reflects formal-charge placement (not over-valence).
+        Lower values indicate a more preferred molecular state.
     """
     score = 0
     for atom in mol.GetAtoms():
         if atom.GetAtomicNum() == 0:
             continue
+        radicals = atom.GetNumRadicalElectrons()
+        if radicals > 0:
+            score += 20000 * radicals
         fc = atom.GetFormalCharge()
         if fc == 0:
             continue
@@ -472,6 +477,36 @@ def _atom_charge_penalty(atomic_num: int, formal_charge: int) -> int:
     else:
         score += _POS_CHARGE_PENALTY.get(atomic_num, 6)
     return score
+
+
+def _atom_penalty(atom: Atom, formal_charge: int | None = None) -> int:
+    """Return element-aware penalty for one atom, including radical electrons.
+
+    Combines the radical and formal-charge penalties into a single call when
+    the caller has an ``Atom`` object in its current state.  For hypothetical
+    post-move states (where only a proposed ``formal_charge`` is known) pass
+    ``formal_charge`` explicitly; radicals on the current atom are still
+    checked so that an atom carrying a radical is never mistakenly rated as
+    a cheap reassignment target.
+
+    Parameters
+    ----------
+    atom : rdkit.Chem.rdchem.Atom
+        Atom to score.
+    formal_charge : int or None, default=None
+        Formal charge to use.  When ``None``, uses ``atom.GetFormalCharge()``.
+
+    Returns
+    -------
+    int
+        Penalty value where smaller is preferred.
+    """
+    radicals = atom.GetNumRadicalElectrons()
+    if radicals > 0:
+        return 10000 + 1000 * radicals
+    if formal_charge is None:
+        formal_charge = atom.GetFormalCharge()
+    return _atom_charge_penalty(atom.GetAtomicNum(), formal_charge)
 
 
 def _target_charge_or_none(mol: Mol) -> int | None:
@@ -624,7 +659,58 @@ def _enforce_target_charge(mol: Mol) -> Mol:
                     best_move = move
 
         if best_atom is None:
-            break
+            # Fallback: allow one-unit bounded formal-charge moves that are
+            # valence-safe even when they are not directly implied by current
+            # shell matching. This is needed for aromatic cations such as
+            # pyridinium-like [n+], where bv-based shell mapping often keeps
+            # neutral fc=0 despite a non-zero target molecular charge.
+            fallback_best_idx: int | None = None
+            fallback_best_score = None
+            for atom in mol.GetAtoms():
+                atomic_num = atom.GetAtomicNum()
+                if atomic_num in (0, 1):
+                    continue
+
+                old_fc = atom.GetFormalCharge()
+                new_fc = old_fc + step
+                if not _formal_charge_in_bounds(atomic_num, new_fc):
+                    continue
+
+                int_bv = _bond_valence(atom, integer=True)
+                if int_bv > _max_allowed_int_bv_at_fc(atom, new_fc):
+                    continue
+
+                # Skip assignments where new_fc does not correspond to any
+                # valid valence shell at the current bond valence — these would
+                # force RDKit to assign a radical electron to satisfy valence.
+                shell_for_new_fc = int_bv - new_fc
+                if shell_for_new_fc not in _valid_valences(atom):
+                    continue
+
+                penalty_delta = _atom_charge_penalty(
+                    atomic_num, new_fc
+                ) - _atom_charge_penalty(atomic_num, old_fc)
+                aromatic_n_bonus = (
+                    -3 if (step > 0 and atomic_num == 7 and atom.GetIsAromatic()) else 0
+                )
+                electronegative_bonus = (
+                    -1 if (step < 0 and atomic_num in (8, 9, 16, 17, 35, 53)) else 0
+                )
+                score = (
+                    penalty_delta + aromatic_n_bonus + electronegative_bonus,
+                    abs(new_fc),
+                    0 if atom.IsInRing() else 1,
+                )
+
+                if fallback_best_score is None or score < fallback_best_score:
+                    fallback_best_score = score
+                    fallback_best_idx = atom.GetIdx()
+
+            if fallback_best_idx is None:
+                break
+            atom = mol.GetAtomWithIdx(fallback_best_idx)
+            atom.SetFormalCharge(atom.GetFormalCharge() + step)
+            continue
 
         if best_new_fc is None:
             break
@@ -652,13 +738,10 @@ def _charge_score(mol: Mol) -> int:
     int
         Composite integer score. Lower is better.
     """
-    score = molecule_charge_penalty(mol)
+    score = molecular_penalty(mol)
     for atom in mol.GetAtoms():
         if atom.GetAtomicNum() == 0:
             continue
-        radicals = atom.GetNumRadicalElectrons()
-        if radicals > 0:
-            score += 20000 * radicals
         int_bv = int(_bond_valence(atom, integer=True))
         over = int_bv - _max_allowed_int_bv(atom)
         if over > 0:
@@ -666,7 +749,7 @@ def _charge_score(mol: Mol) -> int:
     return score
 
 
-def _charge_objective(mol: Mol) -> Objective:
+def _charge_objective(mol: Mol, phase: str = "optimize") -> Objective | tuple[int, ...]:
     """Lexicographic objective for trial bond-order moves.
 
     Primary key is ``_charge_score``; the target-charge gap is a secondary
@@ -679,6 +762,14 @@ def _charge_objective(mol: Mol) -> Objective:
     ----------
     mol : rdkit.Chem.rdchem.Mol
         Molecule to score.
+
+    Parameters
+    ----------
+    phase : str, default="optimize"
+        Objective layout selector:
+        - ``"optimize"``: default ordering used by move engines.
+        - ``"retarget"``: prioritizes target-charge and radical cleanup before
+          charge-localization tie breaks for RDKit retarget candidate selection.
 
     Returns
     -------
@@ -706,7 +797,7 @@ def _charge_objective(mol: Mol) -> Objective:
                 and atom.GetTotalNumHs() > 0
             ):
                 protonated_ring_n_cations += 1
-    return (
+    base_obj: Objective = (
         abs(_target_charge_delta(mol)),
         _charge_score(mol),
         radical_atoms,
@@ -714,6 +805,21 @@ def _charge_objective(mol: Mol) -> Objective:
         neg_nitrogen,
         protonated_ring_n_cations,
         abs_charge,
+    )
+    if phase != "retarget":
+        return base_obj
+
+    # Retarget ranking: prefer charge-consistent, non-radical candidates first,
+    # then minimize formal-charge penalty while still considering over-valence.
+    return (
+        base_obj[0],
+        base_obj[2],
+        molecular_penalty(mol),
+        base_obj[1],
+        base_obj[3],
+        base_obj[4],
+        base_obj[5],
+        base_obj[6],
     )
 
 
@@ -878,6 +984,7 @@ def _generate_paths_between_atoms(
     idx_a: int,
     idx_b: int,
     graph: nx.Graph | None = None,
+    max_path_len: int = 15,
 ) -> Generator[Path, None, None]:
     """Yield candidate paths between two atoms lazily.
 
@@ -896,6 +1003,8 @@ def _generate_paths_between_atoms(
         Destination atom index.
     graph : networkx.Graph or None, default=None
         Optional precomputed heavy-atom graph.
+    max_path_len : int, default=8
+        Maximum number of edges in generated simple paths.
 
     Yields
     ------
@@ -906,7 +1015,7 @@ def _generate_paths_between_atoms(
         graph = tmos.graph_mapping.mol_to_graph(mol, remove_hydrogens=True)
 
     try:
-        for path in nx.all_simple_paths(graph, idx_a, idx_b):
+        for path in nx.all_simple_paths(graph, idx_a, idx_b, cutoff=max_path_len):
             if len(path) < 2:
                 continue
             yield list(path)
@@ -964,6 +1073,8 @@ def _neutral_sink_priority(atom: Atom) -> int:
 
     if atomic_num == 7:
         return 80
+    if atomic_num == 15:
+        return 70
     if atomic_num == 16:
         return 55
     return 0
@@ -1106,25 +1217,6 @@ class _GraphMoveEngine:
         """
         return atom.GetFormalCharge() != 0 or atom.GetNumRadicalElectrons() > 0
 
-    @staticmethod
-    def _atom_charge_cost(atom: Atom) -> int:
-        """Return local penalty for one atom state.
-
-        Parameters
-        ----------
-        atom : rdkit.Chem.rdchem.Atom
-            Atom to score.
-
-        Returns
-        -------
-        int
-            Local atom penalty used for prioritization.
-        """
-        radicals = atom.GetNumRadicalElectrons()
-        if radicals > 0:
-            return 10000 + 1000 * radicals
-        return _atom_charge_penalty(atom.GetAtomicNum(), atom.GetFormalCharge())
-
     @classmethod
     def _atom_site_penalty(cls, mol: Mol, atom_idx: int) -> int:
         """Return optimization priority penalty for one atom.
@@ -1142,7 +1234,7 @@ class _GraphMoveEngine:
             Site penalty used for ranking.
         """
         atom = mol.GetAtomWithIdx(atom_idx)
-        charge_cost = cls._atom_charge_cost(atom)
+        charge_cost = _atom_penalty(atom)
         if charge_cost > 0:
             return charge_cost
 
@@ -1291,16 +1383,18 @@ class _GraphMoveEngine:
                 src,
                 dst,
                 graph=graph,
+                max_path_len=15,
             )
 
         src_atom = base.GetAtomWithIdx(src)
-        src_fc_base = src_atom.GetFormalCharge()
         src_bv_base = _bond_valence(src_atom)  # float, used for shell estimate
-        src_cur_penalty = _atom_charge_penalty(src_atom.GetAtomicNum(), src_fc_base)
+        # Use _atom_charge_cost (includes radical penalty) so that paths which
+        # eliminate a radical but leave the formal charge unchanged are not
+        # incorrectly pre-screened out.
+        src_cur_penalty = _atom_penalty(src_atom)
         dst_atom = base.GetAtomWithIdx(dst)
-        dst_fc_base = dst_atom.GetFormalCharge()
         dst_bv_base = _bond_valence(dst_atom)
-        dst_cur_penalty = _atom_charge_penalty(dst_atom.GetAtomicNum(), dst_fc_base)
+        dst_cur_penalty = _atom_penalty(dst_atom)
 
         with _time_stage("path_eval"):
             for path in path_iter:
@@ -1445,7 +1539,7 @@ class _GraphMoveEngine:
 
             atom_order = sorted(
                 [a.GetIdx() for a in work.GetAtoms() if a.GetAtomicNum() != 1],
-                key=lambda idx: cls._atom_charge_cost(work.GetAtomWithIdx(idx)),
+                key=lambda idx: _atom_penalty(work.GetAtomWithIdx(idx)),
                 reverse=True,
             )
 
@@ -1708,14 +1802,7 @@ class _GraphMoveEngine:
                 endpoint_scores_cache[atom_idx] = scores
                 return scores
 
-            # Radical sites are hard constraints; do not over-fit direction here.
-            if atom.GetNumRadicalElectrons() > 0:
-                scores: dict[int, int] = {1: 0, -1: 0}
-                endpoint_scores_cache[atom_idx] = scores
-                return scores
-
-            current_fc = atom.GetFormalCharge()
-            current_penalty = _atom_charge_penalty(atom.GetAtomicNum(), current_fc)
+            current_penalty = _atom_penalty(atom)
             current_bv = _bond_valence(atom)
 
             scores: dict[int, int] = {1: 0, -1: 0}
@@ -1959,27 +2046,6 @@ class _GraphMoveEngine:
             return candidate
         return current
 
-    @staticmethod
-    def _charge_cost_with_fc(atom: Atom, new_fc: int) -> int:
-        """Return atom cost for a hypothetical formal charge.
-
-        Parameters
-        ----------
-        atom : rdkit.Chem.rdchem.Atom
-            Atom to score.
-        new_fc : int
-            Proposed formal charge.
-
-        Returns
-        -------
-        int
-            Local charge/radical penalty.
-        """
-        radicals = atom.GetNumRadicalElectrons()
-        if radicals > 0:
-            return 10000 + 1000 * radicals
-        return _atom_charge_penalty(atom.GetAtomicNum(), new_fc)
-
     @classmethod
     def _force_charge_balance(cls, mol: Mol) -> Mol:
         """Nudge formal charges toward the target total without changing bonds.
@@ -2025,7 +2091,7 @@ class _GraphMoveEngine:
                 if int_bv > _max_allowed_int_bv_at_fc(atom, new_fc):
                     continue
 
-                score = cls._charge_cost_with_fc(atom, new_fc)
+                score = _atom_penalty(atom, new_fc)
                 if best_score is None or score < best_score:
                     best_score = score
                     best_idx = atom.GetIdx()
@@ -2219,6 +2285,90 @@ class _GraphMoveEngine:
         return base
 
     @classmethod
+    def _path_lookahead_charge_gap(
+        cls,
+        mol: Mol,
+        max_candidates: int = 8,
+        max_path_len: int = 8,
+    ) -> Mol | None:
+        """Find a path move that reduces the target-charge gap.
+
+        When ``_assign_formal_charges`` leaves the molecule under-charged
+        (total charge < target) but all atoms appear locally neutral
+        (fc=0, rad=0), the standard path engine finds no active sites and
+        returns without acting.  This pass treats atoms that would carry
+        fc=+1 at bv+1 (e.g. N at bv=3→4) as virtual sources, searches for
+        alternating-bond paths between pairs of them, and accepts any move
+        whose global ``_charge_objective`` strictly improves — meaning the
+        charge-delta reduction dominates the local charge-score increase.
+
+        Classic example: imidazolium-like rings where C=C sits between two N
+        atoms that each need one more bond::
+
+            N2-C1=C0-N3  →  N2=C1-C0=N3   (both N reach bv=4, fc=+1)
+
+        Parameters
+        ----------
+        mol : rdkit.Chem.rdchem.Mol
+            Molecule after ``_assign_formal_charges``.
+        max_candidates : int, default=8
+            Maximum candidate source atoms to inspect.
+        max_path_len : int, default=8
+            Maximum path length to search.
+
+        Returns
+        -------
+        rdkit.Chem.rdchem.Mol or None
+            First improving candidate, or ``None`` when none is found.
+        """
+        charge_delta = _target_charge_delta(mol)
+        if charge_delta >= 0:
+            return None
+
+        # Candidate atoms: neutral N or P where one extra bond valence
+        # would naturally yield fc=+1 via _best_formal_charge.
+        candidates: list[int] = []
+        for atom in mol.GetAtoms():
+            if atom.GetAtomicNum() in (0, 1):
+                continue
+            if atom.GetFormalCharge() != 0 or atom.GetNumRadicalElectrons() != 0:
+                continue
+            bv = _bond_valence(atom)
+            if _best_formal_charge(atom, bv + 1) == 1:
+                candidates.append(atom.GetIdx())
+
+        if not candidates:
+            return None
+
+        engine = cls(
+            max_iters=1,
+            use_relay=False,
+            use_paths=True,
+            path_mode="charged_sinks",
+        )
+        graph = tmos.graph_mapping.mol_to_graph(mol, remove_hydrogens=True)
+        base_obj = _charge_objective(mol)
+
+        limited = candidates[:max_candidates]
+        for i, src in enumerate(limited):
+            for dst in limited[i + 1 :]:
+                for path in _generate_paths_between_atoms(
+                    mol, src, dst, graph=graph, max_path_len=max_path_len
+                ):
+                    for first_delta in (1, -1):
+                        atom_delta = _compute_path_deltas(mol, path, first_delta)
+                        if atom_delta is None:
+                            continue
+                        candidate = engine._apply_path_move(mol, path, first_delta)
+                        if candidate is None:
+                            continue
+                        candidate = _assign_formal_charges_local(candidate, set(path))
+                        if _charge_objective(candidate) < base_obj:
+                            return candidate
+
+        return None
+
+    @classmethod
     def _stage_once(
         cls,
         mol: Mol,
@@ -2303,6 +2453,18 @@ class _GraphMoveEngine:
             mol = _prepare_for_cleanup(mol)
             mol = _fix_overvalenced(mol)
             mol = _assign_formal_charges(mol)
+
+        # Under-charged recovery: when the normalized molecule has no active
+        # sites but total charge falls short of the target, search for a path
+        # that promotes bond orders to neutral N/P atoms so they naturally
+        # receive fc=+1. Acceptance is governed by _charge_objective so the
+        # charge-delta drop (primary key) outweighs the local penalty rise.
+        if _target_charge_delta(mol) < 0:
+            with _time_stage("path_lookahead_charge_gap"):
+                cg_candidate = cls._path_lookahead_charge_gap(Chem.Mol(mol))
+            if cg_candidate is not None:
+                mol = cg_candidate
+
         return mol
 
     @classmethod
@@ -2395,9 +2557,9 @@ class _GraphMoveEngine:
 
             cand_key = (
                 _charge_objective(candidate),
-                molecule_charge_penalty(candidate),
+                molecular_penalty(candidate),
             )
-            curr_key = (_charge_objective(current), molecule_charge_penalty(current))
+            curr_key = (_charge_objective(current), molecular_penalty(current))
             return candidate if cand_key < curr_key else current
 
         work = _prepare_for_cleanup(Chem.Mol(mol))
@@ -2428,11 +2590,22 @@ class _GraphMoveEngine:
             work = cls._stage_once(work, local_engine, global_engine)
             work_objective = _charge_objective(work)
 
+            # Strip any radical electrons generated during this stage.  Score is
+            # computed first so the 20000×radical penalty honestly steers convergence;
+            # clearing afterwards keeps the work molecule chemically consistent for
+            # fingerprinting and for the next stage's bond-promotion logic.
+            if any(
+                a.GetNumRadicalElectrons() > 0
+                for a in work.GetAtoms()
+                if a.GetAtomicNum() > 1
+            ):
+                work = _strip_radicals_and_reassign(work)
+
             quick = cls._sanitize_candidate_or_none(work)
             if (
                 quick is not None
                 and _target_charge_delta(quick) == 0
-                and molecule_charge_penalty(quick) == 0
+                and molecular_penalty(quick) == 0
             ):
                 return quick
 
@@ -2525,11 +2698,24 @@ class _GraphMoveEngine:
         return final
 
 
-def _score_structure_for_cleanup(candidate_struct: Mol) -> Objective:
-    """Return cleanup objective after lightweight retyping on a trial structure."""
+def _score_structure_for_cleanup(
+    candidate_struct: Mol,
+    preassigned: bool = False,
+) -> Objective:
+    """Return cleanup objective after lightweight retyping on a trial structure.
+
+    Parameters
+    ----------
+    candidate_struct : rdkit.Chem.rdchem.Mol
+        Candidate structure.
+    preassigned : bool, default=False
+        If ``True``, ``candidate_struct`` is assumed to already have formal
+        charges assigned, so the initial assignment step is skipped.
+    """
     probe = Chem.Mol(candidate_struct)
     probe.UpdatePropertyCache(strict=False)
-    probe = _assign_formal_charges(probe)
+    if not preassigned:
+        probe = _assign_formal_charges(probe)
     probe = _reduce_charge_by_bond_promotion(probe)
     return _charge_objective(probe)
 
@@ -2669,6 +2855,7 @@ def _evaluate_secondary_bond_removal(
     mol: Mol,
     idx_a: int,
     idx_b: int,
+    stretch: float,
     dist: float,
     best_obj: Objective,
     oxygen_rich_ps_bridge: bool,
@@ -2684,8 +2871,11 @@ def _evaluate_secondary_bond_removal(
         return None
 
     trial_obj = _score_structure_for_cleanup(trial)
+    # For very stretched heavy-atom bonds, allow non-worsening removal even
+    # when charge objective does not strictly improve; these are frequently
+    # connectivity artefacts from distance-based initial perception.
     keep_if_non_worse = (
-        oxygen_rich_ps_bridge or hypercoord_pp_bridge
+        oxygen_rich_ps_bridge or hypercoord_pp_bridge or stretch >= 0.17
     ) and trial_obj <= best_obj
     if trial_obj < best_obj or keep_if_non_worse:
         return (trial_obj, dist, idx_a, idx_b)
@@ -2711,6 +2901,19 @@ def _fix_overvalenced(mol: Mol) -> Mol:
     """
     mol = Chem.RWMol(mol)
     conf = mol.GetConformer() if mol.GetNumConformers() > 0 else None
+    if conf is not None:
+        coords = {
+            i: np.array(
+                [
+                    conf.GetAtomPosition(i).x,
+                    conf.GetAtomPosition(i).y,
+                    conf.GetAtomPosition(i).z,
+                ]
+            )
+            for i in range(mol.GetNumAtoms())
+        }
+    else:
+        coords = None
 
     def _geom_longest(bonds: list[Bond], atom_idx: int) -> Bond:
         """Return furthest bond endpoint from the center atom.
@@ -2727,21 +2930,16 @@ def _fix_overvalenced(mol: Mol) -> Mol:
         rdkit.Chem.rdchem.Bond
             Selected bond. If no conformer exists, returns the first bond.
         """
-        if conf is None:
+        if coords is None:
             return bonds[0]
-        p0 = conf.GetAtomPosition(atom_idx)
-        p0 = np.array([p0.x, p0.y, p0.z])
+        p0 = coords[atom_idx]
         return max(
             bonds,
-            key=lambda b: np.linalg.norm(
-                np.array(
-                    [
-                        conf.GetAtomPosition(b.GetOtherAtomIdx(atom_idx)).x,
-                        conf.GetAtomPosition(b.GetOtherAtomIdx(atom_idx)).y,
-                        conf.GetAtomPosition(b.GetOtherAtomIdx(atom_idx)).z,
-                    ]
+            key=lambda b: float(
+                np.dot(
+                    coords[b.GetOtherAtomIdx(atom_idx)] - p0,
+                    coords[b.GetOtherAtomIdx(atom_idx)] - p0,
                 )
-                - p0
             ),
         )
 
@@ -2793,6 +2991,8 @@ def _fix_overvalenced(mol: Mol) -> Mol:
                     filtered = single
                 longest = _geom_longest(filtered, idx)
                 mol.RemoveBond(longest.GetBeginAtomIdx(), longest.GetEndAtomIdx())
+                longest.GetBeginAtom().SetNumRadicalElectrons(0)
+                longest.GetEndAtom().SetNumRadicalElectrons(0)
                 mol.UpdatePropertyCache(strict=False)
                 changed = True
                 break
@@ -2819,7 +3019,7 @@ def _fix_overvalenced(mol: Mol) -> Mol:
         conf_best = (
             best_struct.GetConformer() if best_struct.GetNumConformers() > 0 else None
         )
-        candidate_updates: list[tuple[Objective, float, int, int]] = []
+        best_update: tuple[Objective, float, int, int] | None = None
 
         # Gather candidate stretched single bonds and evaluate only the most
         # suspicious ones for speed.
@@ -2835,28 +3035,50 @@ def _fix_overvalenced(mol: Mol) -> Mol:
             break
 
         stretched.sort(reverse=True)
-        for _, i, j, dist, oxygen_rich_ps_bridge, hypercoord_pp_bridge in stretched[:8]:
+        for (
+            stretch,
+            i,
+            j,
+            dist,
+            oxygen_rich_ps_bridge,
+            hypercoord_pp_bridge,
+        ) in stretched[:8]:
             evaluated = _evaluate_secondary_bond_removal(
                 best_struct,
                 i,
                 j,
+                stretch,
                 dist,
                 best_obj,
                 oxygen_rich_ps_bridge,
                 hypercoord_pp_bridge,
             )
-            if evaluated is not None:
-                candidate_updates.append(evaluated)
+            if evaluated is None:
+                continue
+            if best_update is None:
+                best_update = evaluated
+                continue
+            cand_obj, cand_dist, _, _ = evaluated
+            best_u_obj, best_u_dist, _, _ = best_update
+            if (cand_obj, -cand_dist) < (best_u_obj, -best_u_dist):
+                best_update = evaluated
 
-        if not candidate_updates:
+        if best_update is None:
             break
 
-        # Prefer best objective first, then longer bond as weakest-link tie-breaker.
-        candidate_updates.sort(key=lambda x: (x[0], -x[1]))
-        chosen_obj, _, idx_a, idx_b = candidate_updates[0]
+        chosen_obj, _, idx_a, idx_b = best_update
         best_struct = _trial_after_bond_removal(best_struct, idx_a, idx_b)
         best_obj = chosen_obj
 
+    # Bond removal (above) leaves the detached atom's valence unfilled;
+    # UpdatePropertyCache(strict=False) fills that gap with radical electrons.
+    # Clear them here so downstream passes (_promote_underbonded, _assign_formal_charges)
+    # see a radical-free graph and can reason purely about bond valence.
+    rw_final = Chem.RWMol(best_struct)
+    for atom in rw_final.GetAtoms():
+        if atom.GetAtomicNum() > 1 and atom.GetNumRadicalElectrons() > 0:
+            atom.SetNumRadicalElectrons(0)
+    best_struct = rw_final.GetMol()
     best_struct.UpdatePropertyCache(strict=False)
     return best_struct
 
@@ -2993,10 +3215,13 @@ def _assign_formal_charges(mol: Mol) -> Mol:
         ):
             atom.SetFormalCharge(1)
 
-        if atom.GetNumRadicalElectrons() > 0:
-            implied_shell = int(round(bv)) - atom.GetFormalCharge()
-            if implied_shell in _valid_valences(atom):
-                atom.SetNumRadicalElectrons(0)
+        atom.SetNumRadicalElectrons(0)
+
+    # Final sweep for atoms skipped above (best_fc is None or atomicNum==1).
+    # Hydrogens and dummy atoms carry no meaningful radical count here.
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() > 1 and atom.GetNumRadicalElectrons() > 0:
+            atom.SetNumRadicalElectrons(0)
 
     mol = _enforce_target_charge(mol)
     mol.UpdatePropertyCache(strict=False)
@@ -3142,7 +3367,7 @@ def _reduce_charge_by_bond_promotion(mol: Mol) -> Mol:
         changed = False
         base = _assign_formal_charges(rw.GetMol())
         base_obj = _charge_objective(base)
-        base_penalty = molecule_charge_penalty(base)
+        base_penalty = molecular_penalty(base)
 
         best_candidate = None
         best_score = None
@@ -3178,6 +3403,16 @@ def _reduce_charge_by_bond_promotion(mol: Mol) -> Mol:
                     and bv_int < min(valences)
                 ):
                     candidate_single_bonds.append(b)
+                    continue
+                # Generalized cation relief: allow neutral heavy neighbors when
+                # a cationic center can be neutralized only through coupled
+                # promotions (for example, S+/P+ patterns with nearby O-/C).
+                if (
+                    atom.GetFormalCharge() > 0
+                    and other.GetFormalCharge() == 0
+                    and other.GetAtomicNum() in (6, 7, 8, 15, 16)
+                ):
+                    candidate_single_bonds.append(b)
 
             candidate_single_bonds = sorted(
                 candidate_single_bonds,
@@ -3205,7 +3440,7 @@ def _reduce_charge_by_bond_promotion(mol: Mol) -> Mol:
                 candidate = _assign_formal_charges(trial_rw.GetMol())
 
                 cand_obj = _charge_objective(candidate)
-                cand_penalty = molecule_charge_penalty(candidate)
+                cand_penalty = molecular_penalty(candidate)
                 base_local = _local_atom_penalty(base, affected)
                 cand_local = _local_atom_penalty(candidate, affected)
 
@@ -3242,7 +3477,7 @@ def _reduce_charge_by_bond_promotion(mol: Mol) -> Mol:
                     bond.GetEndAtomIdx(),
                 }
                 cand_obj = _charge_objective(candidate)
-                cand_penalty = molecule_charge_penalty(candidate)
+                cand_penalty = molecular_penalty(candidate)
                 base_local = _local_atom_penalty(base, affected)
                 cand_local = _local_atom_penalty(candidate, affected)
 
@@ -3342,6 +3577,167 @@ def _restore_explicit_hydrogen_flags(mol: Mol) -> Mol:
     return rw.GetMol()
 
 
+def _heavy_atom_edge_count(mol: Mol) -> int:
+    """Return count of heavy-atom bonds in ``mol``."""
+    count = 0
+    for bond in mol.GetBonds():
+        if (
+            bond.GetBeginAtom().GetAtomicNum() == 1
+            or bond.GetEndAtom().GetAtomicNum() == 1
+        ):
+            continue
+        count += 1
+    return count
+
+
+def _fix_aromatic_radical_cations(mol: Mol) -> Mol:
+    """Resolve N+\u2022 atoms adjacent to aromatic carbons via quinoid bond reassignment.
+
+    When N+\u2022 is bonded to an aromatic ring carbon the radical cannot be
+    eliminated by individual path moves because the fix requires simultaneously
+    re-assigning all bonds in the aromatic ring (quinoid Kekul\u00e9 form).
+    This pass:
+
+    1. Finds N+\u2022 atoms bonded to aromatic carbons.
+    2. For each aromatic ring containing those carbons, manually assigns a
+       Kekul\u00e9 pattern where the N-adjacent ring bonds are single and the
+       remaining ring bonds alternate double/single.
+    3. Sets each exocyclic N-C bond to double.
+    4. Clears the radical from any N+ atom whose bond valence reaches 4 as a
+       result.
+
+    If the fix raises any exception the original molecule is returned unchanged.
+    """
+    # Collect (n_idx, c_idx) pairs where N+• is bonded to an aromatic C.
+    targets: list[tuple[int, int]] = []
+    for atom in mol.GetAtoms():
+        if atom.GetNumRadicalElectrons() == 0 or atom.GetFormalCharge() <= 0:
+            continue
+        for bond in atom.GetBonds():
+            other = bond.GetOtherAtom(atom)
+            if other.GetIsAromatic() and other.GetAtomicNum() == 6:
+                targets.append((atom.GetIdx(), other.GetIdx()))
+    if not targets:
+        return mol
+
+    c_targets = {c_idx for _, c_idx in targets}
+    rwmol = Chem.RWMol(Chem.Mol(mol))
+    ri = mol.GetRingInfo()
+    processed_rings: set[frozenset[int]] = set()
+
+    for ring in ri.AtomRings():
+        ring_key = frozenset(ring)
+        if ring_key in processed_rings:
+            continue
+        if not (ring_key & c_targets):
+            continue
+        # Only dearomatize fully aromatic rings.
+        if not all(mol.GetAtomWithIdx(i).GetIsAromatic() for i in ring):
+            continue
+        processed_rings.add(ring_key)
+
+        ring_list = list(ring)
+        n = len(ring_list)
+        exo_c_in_ring = ring_key & c_targets
+
+        # Bonds adjacent to an exo-double carbon are forced to SINGLE.
+        # The remaining bonds alternate DOUBLE/SINGLE starting from the first
+        # non-adjacent position.
+        bond_orders: list[Chem.BondType | None] = [None] * n
+        for i in range(n):
+            if (ring_list[i] in exo_c_in_ring) or (
+                ring_list[(i + 1) % n] in exo_c_in_ring
+            ):
+                bond_orders[i] = Chem.BondType.SINGLE
+
+        if not any(o is None for o in bond_orders):
+            pass  # all forced, nothing to infer
+        else:
+            # Propagate valence constraints to fill in unknown ring bond orders.
+            # For each non-exo ring atom with exactly one unknown ring bond, the
+            # unknown order is fully determined by its target bond valence (4.0
+            # for a benzene-type carbon with one H, taking into account the known
+            # ring bond and all non-ring bonds at their CURRENT values).
+            ring_atom_set = set(ring_list)
+            changed = True
+            while changed:
+                changed = False
+                for pos in range(n):
+                    atom_idx = ring_list[pos]
+                    if atom_idx in exo_c_in_ring:
+                        continue  # ring bonds already forced to SINGLE for exo atoms
+
+                    left_pos = (pos - 1) % n
+                    right_pos = pos
+
+                    ring_bv_known = 0.0
+                    unknown_positions: list[int] = []
+                    for b_pos in (left_pos, right_pos):
+                        if bond_orders[b_pos] is not None:
+                            ring_bv_known += (
+                                2.0
+                                if bond_orders[b_pos] == Chem.BondType.DOUBLE
+                                else 1.0
+                            )
+                        else:
+                            unknown_positions.append(b_pos)
+
+                    if len(unknown_positions) != 1:
+                        continue
+
+                    atom = mol.GetAtomWithIdx(atom_idx)
+                    non_ring_bv = sum(
+                        b.GetBondTypeAsDouble()
+                        for b in atom.GetBonds()
+                        if b.GetOtherAtomIdx(atom_idx) not in ring_atom_set
+                    )
+
+                    remaining = 4.0 - non_ring_bv - ring_bv_known
+                    if abs(remaining - 2.0) < 0.01:
+                        bond_orders[unknown_positions[0]] = Chem.BondType.DOUBLE
+                        changed = True
+                    elif abs(remaining - 1.0) < 0.01:
+                        bond_orders[unknown_positions[0]] = Chem.BondType.SINGLE
+                        changed = True
+
+        if None in bond_orders:
+            continue
+
+        # Apply ring bond orders and clear aromatic flags.
+        for i in range(n):
+            a1 = ring_list[i]
+            a2 = ring_list[(i + 1) % n]
+            b = rwmol.GetBondBetweenAtoms(a1, a2)
+            if b is not None:
+                b.SetBondType(bond_orders[i])
+                b.SetIsAromatic(False)
+            rwmol.GetAtomWithIdx(a1).SetIsAromatic(False)
+            rwmol.GetAtomWithIdx(a2).SetIsAromatic(False)
+
+    # Set exocyclic N-C bonds to double and clear aromatic flags.
+    for n_idx, c_idx in targets:
+        b = rwmol.GetBondBetweenAtoms(n_idx, c_idx)
+        if b is not None:
+            b.SetBondType(Chem.BondType.DOUBLE)
+            b.SetIsAromatic(False)
+        rwmol.GetAtomWithIdx(n_idx).SetIsAromatic(False)
+
+    # Clear radicals from N+ atoms whose bond valence is now 4.
+    for n_idx, _ in targets:
+        atom = rwmol.GetAtomWithIdx(n_idx)
+        bv = _bond_valence(atom)
+        if atom.GetFormalCharge() > 0 and abs(bv - 4.0) < 0.1:
+            atom.SetNumRadicalElectrons(0)
+
+    try:
+        new_mol = rwmol.GetMol()
+        new_mol.UpdatePropertyCache(strict=False)
+        Chem.SanitizeMol(new_mol)
+        return new_mol
+    except Exception:
+        return mol
+
+
 def _retarget_bond_orders_rdkit(mol: Mol, charge: int) -> Mol | None:
     """Attempt a target-charge bond-order re-perception with RDKit.
 
@@ -3366,6 +3762,15 @@ def _retarget_bond_orders_rdkit(mol: Mol, charge: int) -> Mol | None:
             allowChargedFragments=True,
         )
         candidate.UpdatePropertyCache(strict=False)
+
+        raw = Chem.Mol(candidate)
+        if sum(a.GetFormalCharge() for a in raw.GetAtoms()) == int(charge):
+            try:
+                Chem.SanitizeMol(raw)
+                return raw
+            except Exception:
+                pass
+
         candidate = _prepare_for_cleanup(candidate)
         candidate = _fix_overvalenced(candidate)
         candidate = _assign_formal_charges(candidate)
@@ -3522,14 +3927,15 @@ def determine_bonds(
             if charge is not None
             else sum(a.GetFormalCharge() for a in mol.GetAtoms())
         )
-        needs_retarget = molecule_charge_penalty(mol) > 0 or (
+        needs_retarget = molecular_penalty(mol) > 0 or (
             charge is not None
             and sum(a.GetFormalCharge() for a in mol.GetAtoms()) != int(charge)
         )
         if needs_retarget:
             with _time_stage("retarget_after_cleanup"):
                 best = Chem.Mol(mol)
-                best_obj = _charge_objective(best)
+                best_heavy_edges = _heavy_atom_edge_count(best)
+                best_key = _charge_objective(best, phase="retarget")
                 for seed in (Chem.Mol(mol), Chem.Mol(initial_bonded)):
                     trial = _retarget_bond_orders_rdkit(seed, target_for_retarget)
                     if trial is None:
@@ -3539,11 +3945,34 @@ def determine_bonds(
                         != int(charge)
                     ):
                         continue
-                    trial_obj = _charge_objective(trial)
-                    if trial_obj < best_obj:
+                    if _heavy_atom_edge_count(trial) != best_heavy_edges:
+                        continue
+                    trial_key = _charge_objective(trial, phase="retarget")
+                    if trial_key < best_key:
                         best = trial
-                        best_obj = trial_obj
+                        best_key = trial_key
                 mol = best
+        # After the retarget pass, try quinoid dearomatization for any
+        # remaining N+• atoms that are bonded to aromatic carbons.
+        has_arom_radical_cation = any(
+            a.GetNumRadicalElectrons() > 0
+            and a.GetFormalCharge() > 0
+            and any(
+                b.GetOtherAtom(a).GetIsAromatic()
+                and b.GetOtherAtom(a).GetAtomicNum() == 6
+                for b in a.GetBonds()
+            )
+            for a in mol.GetAtoms()
+        )
+        if has_arom_radical_cation:
+            with _time_stage("quinoid_fix"):
+                trial = _fix_aromatic_radical_cations(mol)
+                trial_penalty = molecular_penalty(trial)
+                if trial_penalty < molecular_penalty(mol):
+                    if charge is None or sum(
+                        a.GetFormalCharge() for a in trial.GetAtoms()
+                    ) == int(charge):
+                        mol = trial
         if (
             charge is not None
             and sum([a.GetFormalCharge() for a in mol.GetAtoms()]) != charge
