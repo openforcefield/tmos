@@ -124,9 +124,9 @@ _NEG_CHARGE_PENALTY: dict[int, int] = {
 _POS_CHARGE_PENALTY: dict[int, int] = {
     7: 2,  # N+  (> NEG[O]=1 so N-[O-] is preferred over [N+]=O)
     15: 3,  # P+
-    16: 5,  # S+
+    16: 10,  # S+
     8: 30,  # O+
-    6: 14,  # C+
+    6: 15,  # C+
     # Strongly discourage positive halogens (move charge off Cl/Br/I/F if possible).
     9: 40,
     17: 40,
@@ -886,6 +886,43 @@ def _apply_alternating_path_shift(
         )
     rw.UpdatePropertyCache(strict=False)
     return rw.GetMol()
+
+
+def _min_opposite_charge_separation(mol: Mol, graph: nx.Graph) -> int | None:
+    """Return the minimum graph-distance between any +/\u2212 charged atom pair.
+
+    Since path moves only change bond *orders* (not connectivity), the same
+    ``graph`` object can be reused for both the before- and after-move checks.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        Molecule whose formal charges define the query atoms.
+    graph : networkx.Graph
+        Heavy-atom adjacency graph (topology is bond-order-independent).
+
+    Returns
+    -------
+    int or None
+        Minimum shortest-path length, or ``None`` when no opposite-charge
+        pair exists or the pair is disconnected.
+    """
+    pos = [
+        a.GetIdx()
+        for a in mol.GetAtoms()
+        if a.GetFormalCharge() > 0 and a.GetAtomicNum() > 1
+    ]
+    neg = [
+        a.GetIdx()
+        for a in mol.GetAtoms()
+        if a.GetFormalCharge() < 0 and a.GetAtomicNum() > 1
+    ]
+    if not pos or not neg:
+        return None
+    try:
+        return min(nx.shortest_path_length(graph, p, n) for p in pos for n in neg)
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return None
 
 
 def _apply_alternating_path_shift_via_kekulize(
@@ -1901,6 +1938,10 @@ class _GraphMoveEngine:
         """
         mol = _assign_formal_charges(mol)
         current_obj = _charge_objective(mol)
+        # Budget for score-neutral moves that bring opposite charges closer
+        # together in the molecular graph (e.g. shuffling S+ along a chain
+        # toward an O- so the next iteration can neutralise both directly).
+        proximity_budget = 2
 
         for _ in range(self.max_iters):
             work = self._kekulized_or_none(Chem.Mol(mol))
@@ -1917,6 +1958,15 @@ class _GraphMoveEngine:
 
             best_mol = None
             best_obj = current_obj
+            # First neutral candidate whose move brings opposite charges closer.
+            proximity_mol = None
+
+            # Pre-compute current minimum ± charge separation once per iteration.
+            # Path moves preserve graph topology so iter_graph is valid for both
+            # before- and after-move distance queries.
+            sep_before: int | None = None
+            if iter_graph is not None and proximity_budget > 0:
+                sep_before = _min_opposite_charge_separation(work, iter_graph)
 
             if self.use_relay:
                 for ab_idx, bc_idx, cd_idx in self._iter_relay_specs(work):
@@ -1928,6 +1978,15 @@ class _GraphMoveEngine:
                     if cand_obj < best_obj:
                         best_obj = cand_obj
                         best_mol = candidate
+                    elif (
+                        cand_obj == current_obj
+                        and proximity_mol is None
+                        and sep_before is not None
+                        and sep_before > 1
+                    ):
+                        sep = _min_opposite_charge_separation(candidate, iter_graph)
+                        if sep is not None and sep < sep_before:
+                            proximity_mol = candidate
 
             if self.use_paths:
                 for path, first_delta in self._iter_path_moves(
@@ -1943,15 +2002,30 @@ class _GraphMoveEngine:
                         best_obj = cand_obj
                         best_mol = candidate
                         break
+                    elif (
+                        cand_obj == current_obj
+                        and proximity_mol is None
+                        and sep_before is not None
+                        and sep_before > 1
+                    ):
+                        sep = _min_opposite_charge_separation(candidate, iter_graph)
+                        if sep is not None and sep < sep_before:
+                            proximity_mol = candidate
 
                 if best_mol is not None and best_obj < current_obj:
+                    proximity_budget = 2
                     mol = best_mol
                     current_obj = best_obj
                     continue
 
             if best_mol is None:
+                if proximity_mol is not None and proximity_budget > 0:
+                    proximity_budget -= 1
+                    mol = proximity_mol
+                    continue
                 break
 
+            proximity_budget = 2
             mol = best_mol
             current_obj = best_obj
 
