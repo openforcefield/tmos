@@ -737,6 +737,50 @@ def _is_valence_satisfied(degree: int, atomic_num: int, symbol: str) -> bool:
     return degree in vlist
 
 
+def _connectivity_distance_window(
+    symbol_i: str,
+    symbol_j: str,
+    max_distance_tolerance: float,
+    min_distance_tolerance: float,
+) -> tuple[float, float]:
+    """Return pair-specific distance window used by custom connectivity.
+
+    A small adaptive slack is applied on the upper bound to account for
+    coordinate noise and elongated but still covalent bonds in strained or
+    delocalized systems.
+    """
+    r_i = _get_covalent_radius(symbol_i)
+    r_j = _get_covalent_radius(symbol_j)
+    one_is_tm = _is_transition_metal(symbol_i) or _is_transition_metal(symbol_j)
+    factor = 2 if one_is_tm else 1
+
+    base = r_i + r_j
+    z_i = pt.GetAtomicNumber(symbol_i)
+    z_j = pt.GetAtomicNumber(symbol_j)
+
+    # Keep a conservative generic slack to avoid systematic over-connection in
+    # dense O/P/S systems. Pair-specific allowances below handle known long-
+    # bond cases without globally widening the distance window.
+    adaptive_slack = min(0.02, 0.01 * base)
+
+    pair = {z_i, z_j}
+    # Targeted long-bond allowances that were observed as false negatives:
+    # - C-I / S-I bonds can be modestly elongated in noisy 3D coordinates.
+    # - P-C single bonds in crowded phosphorous environments can be stretched.
+    if pair == {6, 53}:
+        adaptive_slack += 0.045
+    elif pair == {16, 53}:
+        adaptive_slack += 0.115
+    elif pair == {6, 15}:
+        adaptive_slack += 0.085
+    elif pair == {7, 9}:
+        adaptive_slack += 0.022
+
+    max_bond_threshold = base + max_distance_tolerance * factor + adaptive_slack + 0.005
+    min_bond_threshold = base - min_distance_tolerance * factor
+    return min_bond_threshold, max_bond_threshold
+
+
 def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> Mol:
     """Assign connectivity using RDKit native coordinate perception.
 
@@ -819,9 +863,8 @@ def _determine_connectivity_custom(
 
     symbols = [a.GetSymbol() for a in mol.GetAtoms()]
     atomic_nums = [a.GetAtomicNum() for a in mol.GetAtoms()]
-    radii = np.array([_get_covalent_radius(sym) for sym in symbols])
     positions = np.array(
-        [conformer.GetAtomPosition(i) for i in range(len(radii))], dtype=float
+        [conformer.GetAtomPosition(i) for i in range(mol.GetNumAtoms())], dtype=float
     )
     distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
     metal_indices = [
@@ -844,12 +887,12 @@ def _determine_connectivity_custom(
     candidate_pairs: list[tuple[float, int, int]] = []
     for i in range(n):
         for j in range(i + 1, n):
-            one_is_tm: bool = _is_transition_metal(symbols[i]) or _is_transition_metal(
-                symbols[j]
+            min_bond_threshold, max_bond_threshold = _connectivity_distance_window(
+                symbols[i],
+                symbols[j],
+                max_distance_tolerance=max_distance_tolerance,
+                min_distance_tolerance=min_distance_tolerance,
             )
-            factor: int = 2 if one_is_tm else 1
-            max_bond_threshold = radii[i] + radii[j] + max_distance_tolerance * factor
-            min_bond_threshold = radii[i] + radii[j] - min_distance_tolerance * factor
             d = distances[i, j]
             if min_bond_threshold < d < max_bond_threshold:
                 candidate_pairs.append((d, i, j))
