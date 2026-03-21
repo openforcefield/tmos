@@ -759,25 +759,14 @@ def _connectivity_distance_window(
     z_j = pt.GetAtomicNumber(symbol_j)
 
     # Keep a conservative generic slack to avoid systematic over-connection in
-    # dense O/P/S systems. Pair-specific allowances below handle known long-
-    # bond cases without globally widening the distance window.
-    adaptive_slack = min(0.02, 0.01 * base)
+    # dense O/P/S systems. For homonuclear pairs, do not add adaptive slack:
+    # same-element covalent radii are typically more reliable and the extra
+    # tolerance tends to admit unrealistically long E-E bonds.
+    adaptive_slack = 0.02 * base if z_i == z_j else 0.05 * base
 
-    pair = {z_i, z_j}
-    # Targeted long-bond allowances that were observed as false negatives:
-    # - C-I / S-I bonds can be modestly elongated in noisy 3D coordinates.
-    # - P-C single bonds in crowded phosphorous environments can be stretched.
-    if pair == {6, 53}:
-        adaptive_slack += 0.045
-    elif pair == {16, 53}:
-        adaptive_slack += 0.115
-    elif pair == {6, 15}:
-        adaptive_slack += 0.085
-    elif pair == {7, 9}:
-        adaptive_slack += 0.022
-
-    max_bond_threshold = base + max_distance_tolerance * factor + adaptive_slack + 0.005
+    max_bond_threshold = base + max_distance_tolerance * factor + adaptive_slack
     min_bond_threshold = base - min_distance_tolerance * factor
+
     return min_bond_threshold, max_bond_threshold
 
 
@@ -803,7 +792,7 @@ def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> 
 def _determine_connectivity_custom(
     rdkit_mol: Mol,
     max_distance_tolerance: float = 0.2,
-    min_distance_tolerance: float = 0.4,
+    min_distance_tolerance: float = 0.45,
 ) -> Mol:
     """Assign or refine connectivity using covalent-radius distance heuristics.
 
@@ -823,7 +812,7 @@ def _determine_connectivity_custom(
         The input RDKit molecule, which must have at least one conformer with 3D coordinates.
     max_distance_tolerance : float, default=0.2
         Maximum extra distance (Å) above radius sum for bond formation.
-    min_distance_tolerance : float, default=0.4
+    min_distance_tolerance : float, default=0.45
         Minimum distance (Å) below which atoms are considered too close.
 
     Returns
@@ -912,9 +901,21 @@ def _determine_connectivity_custom(
         # spurious (e.g. P-P in a phosphate cage where each P already has
         # three O bonds and degree=3 is valid for P).  Transition-metal
         # atoms are never considered satisfied so TM bonds are unaffected.
-        if _is_valence_satisfied(
-            degrees[i], atomic_nums[i], symbols[i]
-        ) and _is_valence_satisfied(degrees[j], atomic_nums[j], symbols[j]):
+        i_ring_n_sat = (
+            atomic_nums[i] == 7 and degrees[i] == 2 and mol.GetAtomWithIdx(i).IsInRing()
+        )
+        j_ring_n_sat = (
+            atomic_nums[j] == 7 and degrees[j] == 2 and mol.GetAtomWithIdx(j).IsInRing()
+        )
+        i_satisfied = (
+            _is_valence_satisfied(degrees[i], atomic_nums[i], symbols[i])
+            or i_ring_n_sat
+        )
+        j_satisfied = (
+            _is_valence_satisfied(degrees[j], atomic_nums[j], symbols[j])
+            or j_ring_n_sat
+        )
+        if i_satisfied and j_satisfied:
             continue
 
         mol.AddBond(i, j, Chem.BondType.SINGLE)
