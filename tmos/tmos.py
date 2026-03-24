@@ -310,7 +310,7 @@ def sanitize_ligand(
     mol: Chem.rdchem.Mol,
     delete_list: Sequence[Chem.rdchem.Atom] | None = None,
     wipe: bool = True,
-    method: str = "hybrid",
+    method: str = "openbabel",
     charge: int = 0,
     sanitize: bool = True,
 ) -> Chem.rdchem.Mol | None:
@@ -330,10 +330,8 @@ def sanitize_ligand(
     method : str, default="hybrid"
         Choose the tool used to determine bond borders.
 
-        - mdanalysis: ``_infer_bo_and_charges``
         - rdkit: ``rdDetermineBonds.DetermineBondOrders``
         - openbabel: ``PerceiveBondOrders``
-        - hybrid: Run openbabel, and if None, run mdanalysis
 
     charge : int, default=0
         If using RDKit for bond orders, optionally set the charge. If set to 0, some atoms may be defined as radicals.
@@ -379,7 +377,6 @@ def sanitize_ligand(
 def get_ligand_attributes(
     ligand_mol: Chem.rdchem.Mol,
     metal_coordinating_indices: list[int],
-    add_atom: str | None = None,
     add_hydrogens: bool = False,
 ) -> LigandInfo:
     """Analyze ligand valence/bonding to determine connector attributes.
@@ -392,8 +389,6 @@ def get_ligand_attributes(
     metal_coordinating_indices : list[int]
         List of atom indices in ligand_mol that were connected to the metal. It is expected that they
         have a Internal Property, __original_index as well.
-    add_atom : str or None, default=None
-        If an element symbol, the number of hanging bonds will be the number of this atom type present.
     add_hydrogens : bool, default=False
         If True, add explicit hydrogens to the ligand.
 
@@ -907,7 +902,10 @@ def cleave_mol_from_index(
     params.splitHydrides = True  # This should ensure hydrides are split
 
     # Metals of interest SMARTS, including all transition metals and main group metals
-    MetalsOfInterest = "[#3,#11,#12,#19,#13,#21,#22,#23,#24,#25,#26,#27,#28,#29,#30,#39,#40,#41,#42,#43,#44,#45,#46,#47,#48,#57,#72,#73,#74,#75,#76,#77,#78,#79,#80]~[#1,#5,#6,#14,#15,#33,#51,#16,#34,#52,#17,#35,#53,#85]"
+    metal_smarts = ",".join(f"#{atomic_num}" for atomic_num in METALS_NUM)
+    MetalsOfInterest = (
+        f"[{metal_smarts}]" "~[#1,#5,#6,#14,#15,#33,#51,#16,#34,#52,#17,#35,#53,#85]"
+    )
 
     # Find atoms directly bonded to the metal center
     coordinating_atoms: list[int] = [
@@ -1108,9 +1106,7 @@ def sanitize_complex(
                 for atm in m.GetAtoms()
                 if atm.GetIntProp("__original_index") in coordinating_atoms
             ]
-            best_ligand_info = get_ligand_attributes(
-                m, metal_coordinating_indices, add_atom=add_atom
-            )
+            best_ligand_info = get_ligand_attributes(m, metal_coordinating_indices)
 
             total_xtype += len(best_ligand_info["X-type connectors"])
             total_ltype += len(best_ligand_info["L-type connectors"])
