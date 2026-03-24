@@ -22,7 +22,11 @@ from rdkit import RDLogger
 from rdkit.Chem.rdchem import Atom, Mol
 
 import periodictable
-from openbabel import openbabel as ob
+
+try:
+    from openbabel import openbabel as ob
+except ImportError:
+    ob = None
 
 from .utils import get_molecular_formula
 from .graph_mapping import (
@@ -50,10 +54,11 @@ __all__: list[str] = [
     "update_atom_bond_props",
 ]
 
-# Suppress all OpenBabel output including stereochemistry errors
-ob.obErrorLog.SetOutputLevel(0)
-ob.obErrorLog.StopLogging()
-os.environ["BABEL_SILENCE"] = "1"
+# Suppress all OpenBabel output including stereochemistry errors when available.
+if ob is not None:
+    ob.obErrorLog.SetOutputLevel(0)
+    ob.obErrorLog.StopLogging()
+    os.environ["BABEL_SILENCE"] = "1"
 
 # Disable all RDKit logging
 RDLogger.DisableLog("rdApp.*")
@@ -527,6 +532,12 @@ def _determine_connectivity_openbabel(rdkit_mol: Mol) -> Mol:
     rdkit.Chem.Mol
         Molecule with inferred connectivity.
     """
+
+    if ob is None:
+        raise ImportError(
+            "OpenBabel Python bindings are required for method='openbabel'. "
+            "Install with conda (recommended) or pip install tmos[openbabel]."
+        )
 
     ob_mol = ob.OBMol()
     ob_conv = ob.OBConversion()

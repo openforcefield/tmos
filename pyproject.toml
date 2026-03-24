@@ -21,7 +21,6 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "rdkit>=2025.3.3",
-    "openbabel",
     "networkx",
     "qcelemental",
     "periodictable",
@@ -35,6 +34,9 @@ dependencies = [
 "Documentation" = "https://tmos.readthedocs.io/"
 
 [project.optional-dependencies]
+openbabel = [
+  "openbabel",
+]
 test = [
   "pytest>=6.1.2",
 ]

@@ -18,10 +18,15 @@ from typing import TypeAlias
 
 import networkx as nx
 import numpy as np
+from loguru import logger
 from rdkit import Chem
 from rdkit.Chem.rdDetermineBonds import DetermineBondOrders
 from rdkit.Chem.rdchem import Atom, Bond, Mol
-from openbabel import openbabel as ob
+
+try:
+    from openbabel import openbabel as ob
+except ImportError:
+    ob = None
 
 import tmos
 
@@ -81,10 +86,11 @@ def _time_stage(name: str) -> Generator[None, None, None]:
         _STAGE_COUNTS[name] = _STAGE_COUNTS.get(name, 0) + 1
 
 
-# Suppress OpenBabel logging
-ob.obErrorLog.SetOutputLevel(0)
-ob.obErrorLog.StopLogging()
-os.environ["BABEL_SILENCE"] = "1"
+# Suppress OpenBabel logging when available.
+if ob is not None:
+    ob.obErrorLog.SetOutputLevel(0)
+    ob.obErrorLog.StopLogging()
+    os.environ["BABEL_SILENCE"] = "1"
 
 pt = Chem.GetPeriodicTable()
 
@@ -3919,6 +3925,12 @@ def _initial_bonding_openbabel(mol: Mol, charge: int | None = None) -> Mol:
     rdkit.Chem.rdchem.Mol
         Molecule with inferred bonds and target charge metadata.
     """
+    if ob is None:
+        raise ImportError(
+            "OpenBabel Python bindings are required for method='openbabel'. "
+            "Install with conda (recommended) or pip install tmos[openbabel]."
+        )
+
     ob_conversion = ob.OBConversion()
     ob_conversion.SetInAndOutFormats("mol", "mol")
     ob_mol = ob.OBMol()
@@ -3994,6 +4006,12 @@ def determine_bonds(
     mol.UpdatePropertyCache(strict=False)
     if charge is not None:
         mol.SetProp("_target_charge", str(int(charge)))
+
+    if method == "openbabel" and ob is None:
+        logger.warning(
+            "OpenBabel is not available; falling back to RDKit bond perception."
+        )
+        method = "rdkit"
 
     backend = {
         "rdkit": _initial_bonding_rdkit,
