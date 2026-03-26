@@ -16,6 +16,8 @@ from loguru import logger
 from rdkit import Chem
 from rdkit.Chem.rdchem import Atom, Mol
 
+from .graph_mapping import find_atom_mapping
+
 try:
     import py3Dmol
     from rdkit.Chem.Draw import IPythonConsole
@@ -202,6 +204,47 @@ def molecular_formula_to_dict(formula: str) -> dict[str, int]:
     formula_dict: dict[str, int] = {element: int(count) for element, count in matches}
 
     return formula_dict
+
+
+def sync_atom_int_props_by_mapping(
+    source_mol: Mol,
+    target_mol: Mol,
+    prop_names: list[str],
+) -> Mol:
+    """Copy selected atom IntProps from source to target using atom mapping.
+
+    The mapping is derived with :func:`graph_mapping.find_atom_mapping`, which
+    validates that atom environments/connectivity are compatible.
+
+    Parameters
+    ----------
+    source_mol : rdkit.Chem.rdchem.Mol
+        Molecule providing IntProp values.
+    target_mol : rdkit.Chem.rdchem.Mol
+        Molecule to update in place.
+    prop_names : list of str
+        Atom IntProp names to transfer.
+
+    Returns
+    -------
+    rdkit.Chem.rdchem.Mol
+        Updated target molecule.
+    """
+    atom_mapping = find_atom_mapping(source_mol, target_mol)
+
+    for source_idx, target_idx in atom_mapping.items():
+        source_atom = source_mol.GetAtomWithIdx(source_idx)
+        target_atom = target_mol.GetAtomWithIdx(target_idx)
+        for prop_name in prop_names:
+            if not source_atom.HasProp(prop_name):
+                continue
+            try:
+                target_atom.SetIntProp(prop_name, source_atom.GetIntProp(prop_name))
+            except Exception:
+                # Ignore non-int properties for this IntProp-only sync utility.
+                continue
+
+    return target_mol
 
 
 def view3D(

@@ -22,6 +22,7 @@ from loguru import logger
 from rdkit import Chem
 from rdkit.Chem.rdDetermineBonds import DetermineBondOrders
 from rdkit.Chem.rdchem import Atom, Bond, Mol
+from .utils import sync_atom_int_props_by_mapping
 
 try:
     from openbabel import openbabel as ob
@@ -575,10 +576,16 @@ def _trial_after_bond_removal(mol: Mol, idx_a: int, idx_b: int) -> Mol:
 def _try_sanitize_or_none(mol: Mol) -> Mol | None:
     """Return molecule if sanitization succeeds, else ``None``."""
     try:
-        Chem.SanitizeMol(mol)
+        _sanitize_twice(mol)
         return mol
     except Exception:
         return None
+
+
+def _sanitize_twice(mol: Mol) -> None:
+    """Run RDKit sanitization twice in sequence."""
+    Chem.SanitizeMol(mol)
+    Chem.SanitizeMol(mol)
 
 
 def _assign_and_sanitize_or_none(mol: Mol) -> Mol | None:
@@ -3948,6 +3955,8 @@ def _initial_bonding_openbabel(mol: Mol, charge: int | None = None) -> Mol:
         sanitize=False,
         removeHs=False,
     )
+    out = sync_atom_int_props_by_mapping(mol, out, ["__original_index"])
+
     if charge is not None:
         out.SetProp("_target_charge", str(int(charge)))
     return _restore_explicit_hydrogen_flags(out)
@@ -4091,6 +4100,6 @@ def determine_bonds(
         ):
             raise ValueError("Inconsistent charge with target!")
 
-    Chem.SanitizeMol(mol)
+    _sanitize_twice(mol)
 
     return mol
