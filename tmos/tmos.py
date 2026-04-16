@@ -41,7 +41,6 @@ pt = GetPeriodicTable()
 
 def sanitize_molecule(
     mol: Chem.rdchem.Mol,
-    update_charges: bool = True,
     sanitize_aromaticity: bool = False,
     sanitize_kekulize: bool = False,
 ) -> None:
@@ -55,9 +54,6 @@ def sanitize_molecule(
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule to sanitize
-    update_charges : bool, default=True
-        If ``True``, update formal charges from bonding patterns before
-        sanitization.
     sanitize_aromaticity : bool, default=False
         If ``False``, disable ``SANITIZE_SETAROMATICITY``.
     sanitize_kekulize : bool, default=False
@@ -72,9 +68,6 @@ def sanitize_molecule(
     >>> mol = mol_from_smiles("C[N+](=O)[O-]", sanitize=False)
     >>> sanitize_molecule(mol, sanitize_kekulize=True)
     """
-
-    if update_charges:
-        brd.update_formal_charges(mol)
 
     sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL
     if not sanitize_aromaticity:
@@ -311,7 +304,7 @@ def sanitize_ligand(
     delete_list: Sequence[Chem.rdchem.Atom] | None = None,
     wipe: bool = True,
     method: str = "openbabel",
-    charge: int = 0,
+    charge: int = None,
     sanitize: bool = True,
 ) -> Chem.rdchem.Mol | None:
     """Delete atoms from a molecule and then redetermine bond orders.
@@ -333,7 +326,7 @@ def sanitize_ligand(
         - rdkit: ``rdDetermineBonds.DetermineBondOrders``
         - openbabel: ``PerceiveBondOrders``
 
-    charge : int, default=0
+    charge : int, default=None
         If using RDKit for bond orders, optionally set the charge. If set to 0, some atoms may be defined as radicals.
     sanitize : bool, default=True
         If True, the resulting molecule will be sanitized
@@ -362,12 +355,9 @@ def sanitize_ligand(
         mol_after.RemoveAtom(atm.GetIdx())
     mol_after.UpdatePropertyCache(strict=False)
     mol_after = brd.determine_bonds(mol_after, method=method, charge=charge)
-
     if mol_after is not None and sanitize:
         try:
-            sanitize_molecule(
-                mol_after, sanitize_kekulize=True
-            )  # Settings are set for porphyrins and passing TM Benchmark subset of CCD
+            Chem.SanitizeMol(mol_after)
         except Exception:
             mol_after = None
 
@@ -678,7 +668,6 @@ def correct_ferrocene(mol: Chem.rdchem.Mol, index: int) -> tuple[Chem.rdchem.Mol
     for a in mol.GetAtoms():
         a.SetIntProp("__original_index", a.GetIdx())
         if a.GetAtomicNum() in METALS_NUM:
-            # tm_atom = a.GetSymbol()
             new_index = a.GetIdx()
 
     return mol, new_index
@@ -1065,7 +1054,6 @@ def sanitize_complex(
     >>> # isinstance(result, dict)
     >>> # True
     """
-
     mol = prepare_complex(
         copy.deepcopy(mol),
         value_missing_coord=value_missing_coord,
@@ -1106,7 +1094,14 @@ def sanitize_complex(
                 for atm in m.GetAtoms()
                 if atm.GetIntProp("__original_index") in coordinating_atoms
             ]
+
             best_ligand_info = get_ligand_attributes(m, metal_coordinating_indices)
+            #            ### NoteHere
+            #            f2 = best_ligand_info["rdmol"]
+            #            print(f"Fragment {i}: {f2.GetNumAtoms()} atoms")
+            #            missing_orig_idx = sum(1 for a in f2.GetAtoms() if not a.HasProp("__original_index"))
+            #            print(f"  Atoms missing __original_index: {missing_orig_idx}")
+            #            ###
 
             total_xtype += len(best_ligand_info["X-type connectors"])
             total_ltype += len(best_ligand_info["L-type connectors"])

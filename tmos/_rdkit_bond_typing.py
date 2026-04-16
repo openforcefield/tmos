@@ -576,16 +576,10 @@ def _trial_after_bond_removal(mol: Mol, idx_a: int, idx_b: int) -> Mol:
 def _try_sanitize_or_none(mol: Mol) -> Mol | None:
     """Return molecule if sanitization succeeds, else ``None``."""
     try:
-        _sanitize_twice(mol)
+        Chem.SanitizeMol(mol)
         return mol
     except Exception:
         return None
-
-
-def _sanitize_twice(mol: Mol) -> None:
-    """Run RDKit sanitization twice in sequence."""
-    Chem.SanitizeMol(mol)
-    Chem.SanitizeMol(mol)
 
 
 def _assign_and_sanitize_or_none(mol: Mol) -> Mol | None:
@@ -4100,6 +4094,6 @@ def determine_bonds(
         ):
             raise ValueError("Inconsistent charge with target!")
 
-    _sanitize_twice(mol)
+    Chem.SanitizeMol(mol)
 
     return mol
