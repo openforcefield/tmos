@@ -67,28 +67,17 @@ def test_get_ligand_attributes_returns_all_candidates_with_deterministic_ids(
 ):
     ligand, coordinating_indices = _build_test_ligand()
 
-    candidates_1 = tmos_module.get_ligand_attributes(
-        ligand,
-        coordinating_indices,
-        return_all_candidates=True,
-    )
-    candidates_2 = tmos_module.get_ligand_attributes(
-        ligand,
-        coordinating_indices,
-        return_all_candidates=True,
-    )
+    candidates_1 = tmos_module.get_ligand_attributes(ligand, coordinating_indices)
+    candidates_2 = tmos_module.get_ligand_attributes(ligand, coordinating_indices)
 
     assert len(candidates_1) == 2
-    assert [c["candidate_id"] for c in candidates_1] == [
-        c["candidate_id"] for c in candidates_2
+    assert [c.candidate_id for c in candidates_1] == [
+        c.candidate_id for c in candidates_2
     ]
-    assert all(c["candidate_id"].startswith("ligcand-") for c in candidates_1)
-    assert all(
-        "L-type connectors" in c and "X-type connectors" in c for c in candidates_1
-    )
+    assert all(c.candidate_id.startswith("ligcand-") for c in candidates_1)
 
     connector_patterns = {
-        (tuple(sorted(c["L-type connectors"])), tuple(sorted(c["X-type connectors"])))
+        (tuple(sorted(c.l_type_connectors)), tuple(sorted(c.x_type_connectors)))
         for c in candidates_1
     }
     assert connector_patterns == {((42,), ()), ((), (42,))}
@@ -97,33 +86,37 @@ def test_get_ligand_attributes_returns_all_candidates_with_deterministic_ids(
 def test_get_ligand_attributes_default_returns_best_candidate(patch_ligand_enumeration):
     ligand, coordinating_indices = _build_test_ligand()
 
-    best = tmos_module.get_ligand_attributes(ligand, coordinating_indices)
+    candidates = tmos_module.get_ligand_attributes(ligand, coordinating_indices)
+    best = candidates[0]  # best candidate is first (lowest sort key)
 
-    assert best["candidate_id"].startswith("ligcand-")
-    assert best["hanging_bonds"] == 0
-    assert best["L-type connectors"] == [42]
-    assert best["X-type connectors"] == []
+    assert best.candidate_id.startswith("ligcand-")
+    assert best.hanging_bonds == 1
+    assert best.l_type_connectors == []
+    assert best.x_type_connectors == [42]
 
 
 def test_enumerate_ligand_combinations_cartesian_totals():
-    ligand_a1 = {
-        "candidate_id": "ligcand-a1",
-        "L-type connectors": [10],
-        "X-type connectors": [],
-        "total_charge": 0,
-    }
-    ligand_a2 = {
-        "candidate_id": "ligcand-a2",
-        "L-type connectors": [],
-        "X-type connectors": [10],
-        "total_charge": -1,
-    }
-    ligand_b1 = {
-        "candidate_id": "ligcand-b1",
-        "L-type connectors": [20, 21],
-        "X-type connectors": [],
-        "total_charge": 0,
-    }
+    ligand_a1 = tmos_module.LigandInfo(
+        candidate_id="ligcand-a1",
+        l_type_connectors=[10],
+        x_type_connectors=[],
+        total_charge=0,
+        hanging_bonds=0,
+    )
+    ligand_a2 = tmos_module.LigandInfo(
+        candidate_id="ligcand-a2",
+        l_type_connectors=[],
+        x_type_connectors=[10],
+        total_charge=-1,
+        hanging_bonds=0,
+    )
+    ligand_b1 = tmos_module.LigandInfo(
+        candidate_id="ligcand-b1",
+        l_type_connectors=[20, 21],
+        x_type_connectors=[],
+        total_charge=0,
+        hanging_bonds=0,
+    )
 
     combinations_out = tmos_module._enumerate_ligand_combinations(
         [[ligand_a1, ligand_a2], [ligand_b1]]
@@ -142,53 +135,54 @@ def test_enumerate_ligand_combinations_cartesian_totals():
 
 
 def test_enumerate_ligand_combinations_symmetry_reduction():
-    ligand_1_a = {
-        "candidate_id": "ligcand-1a",
-        "chemical_formula": "C1H1N1",
-        "smiles": "[CH]=[N]",
-        "total_charge": 0,
-        "hanging_bonds": 0,
-        "charged_atoms": {},
-        "L-type connectors": [10],
-        "X-type connectors": [],
-    }
-    ligand_1_b = {
-        "candidate_id": "ligcand-1b",
-        "chemical_formula": "C1H1N1",
-        "smiles": "[CH][N-]",
-        "total_charge": -1,
-        "hanging_bonds": 0,
-        "charged_atoms": {0: {"formal_charge": -1}},
-        "L-type connectors": [],
-        "X-type connectors": [10],
-    }
-    ligand_2_a = {
-        "candidate_id": "ligcand-2a",
-        "chemical_formula": "C1H1N1",
-        "smiles": "[CH]=[N]",
-        "total_charge": 0,
-        "hanging_bonds": 0,
-        "charged_atoms": {},
-        "L-type connectors": [20],
-        "X-type connectors": [],
-    }
-    ligand_2_b = {
-        "candidate_id": "ligcand-2b",
-        "chemical_formula": "C1H1N1",
-        "smiles": "[CH][N-]",
-        "total_charge": -1,
-        "hanging_bonds": 0,
-        "charged_atoms": {0: {"formal_charge": -1}},
-        "L-type connectors": [],
-        "X-type connectors": [20],
-    }
+    ligand_1_a = tmos_module.LigandInfo(
+        candidate_id="ligcand-1a",
+        smiles="[CH]=[N]",
+        chemical_formula="C1H1N1",
+        total_charge=0,
+        hanging_bonds=0,
+        charged_atoms={},
+        l_type_connectors=[10],
+        x_type_connectors=[],
+    )
+    ligand_1_b = tmos_module.LigandInfo(
+        candidate_id="ligcand-1b",
+        smiles="[CH][N-]",
+        chemical_formula="C1H1N1",
+        total_charge=-1,
+        hanging_bonds=0,
+        charged_atoms={0: {"formal_charge": -1}},
+        l_type_connectors=[],
+        x_type_connectors=[10],
+    )
+    ligand_2_a = tmos_module.LigandInfo(
+        candidate_id="ligcand-2a",
+        smiles="[CH]=[N]",
+        chemical_formula="C1H1N1",
+        total_charge=0,
+        hanging_bonds=0,
+        charged_atoms={},
+        l_type_connectors=[20],
+        x_type_connectors=[],
+    )
+    ligand_2_b = tmos_module.LigandInfo(
+        candidate_id="ligcand-2b",
+        smiles="[CH][N-]",
+        chemical_formula="C1H1N1",
+        total_charge=-1,
+        hanging_bonds=0,
+        charged_atoms={0: {"formal_charge": -1}},
+        l_type_connectors=[],
+        x_type_connectors=[20],
+    )
 
     combinations_out = tmos_module._enumerate_ligand_combinations(
         [[ligand_1_a, ligand_1_b], [ligand_2_a, ligand_2_b]]
     )
 
-    assert len(combinations_out) == 3
-    assert all(x["dedupe_group_ids"] == ["g0", "g0"] for x in combinations_out)
+    assert (
+        len(combinations_out) == 4
+    )  # no symmetry reduction; (1a,2b) and (1b,2a) are distinct by candidate_id
     combo_signatures = {
         (
             x["number_Ltype_connectors"],
@@ -200,7 +194,7 @@ def test_enumerate_ligand_combinations_symmetry_reduction():
     assert combo_signatures == {(2, 0, 0), (1, 1, -1), (0, 2, -2)}
 
 
-def test_score_ligand_combinations_with_metal_prefers_charge_consistency(monkeypatch):
+def test_score_and_flatten_states_prefers_charge_consistency(monkeypatch):
     tm_mol = Chem.MolFromSmiles("[Fe]")
 
     # Keep metal-state options deterministic for scoring assertions.
@@ -210,38 +204,37 @@ def test_score_ligand_combinations_with_metal_prefers_charge_consistency(monkeyp
         lambda *_args, **_kwargs: ([2], np.array([2]), np.array([18])),
     )
 
+    li_a = tmos_module.LigandInfo(
+        hanging_bonds=0, l_type_connectors=[], x_type_connectors=[]
+    )
+    li_b = tmos_module.LigandInfo(
+        hanging_bonds=0, l_type_connectors=[], x_type_connectors=[]
+    )
     combinations_in = [
         {
-            "ligand_info": [{"hanging_bonds": 0}],
+            "ligand_info": [li_a],
             "candidate_ids": ["ligcand-a"],
             "number_Ltype_connectors": 0,
             "number_Xtype_connectors": 2,
             "total_ligand_charge": -2,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k0",),
         },
         {
-            "ligand_info": [{"hanging_bonds": 0}],
+            "ligand_info": [li_b],
             "candidate_ids": ["ligcand-b"],
             "number_Ltype_connectors": 0,
             "number_Xtype_connectors": 2,
             "total_ligand_charge": 0,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k1",),
         },
     ]
 
-    scored = tmos_module._score_ligand_combinations_with_metal(tm_mol, combinations_in)
+    scored = tmos_module._score_and_flatten_states(tm_mol, combinations_in)
 
-    assert scored[0]["candidate_ids"] == ["ligcand-a"]
-    assert scored[0]["metal_scoring"]["best_state"]["predicted_complex_charge"] == 0
-    assert (
-        scored[0]["metal_scoring"]["best_score"]
-        < scored[1]["metal_scoring"]["best_score"]
-    )
+    assert scored[0].ligands.candidate_ids == ["ligcand-a"]
+    assert scored[0].predicted_complex_charge == 0
+    assert scored[0].score < scored[1].score
 
 
-def test_score_ligand_combinations_with_metal_penalizes_residual_valence(monkeypatch):
+def test_score_and_flatten_states_penalizes_residual_valence(monkeypatch):
     tm_mol = Chem.MolFromSmiles("[Fe]")
 
     monkeypatch.setattr(
@@ -250,37 +243,37 @@ def test_score_ligand_combinations_with_metal_penalizes_residual_valence(monkeyp
         lambda *_args, **_kwargs: ([2], np.array([2]), np.array([18])),
     )
 
+    li_clean = tmos_module.LigandInfo(
+        hanging_bonds=0, l_type_connectors=[], x_type_connectors=[]
+    )
+    li_residual = tmos_module.LigandInfo(
+        hanging_bonds=3, l_type_connectors=[], x_type_connectors=[]
+    )
     combinations_in = [
         {
-            "ligand_info": [{"hanging_bonds": 0}],
+            "ligand_info": [li_clean],
             "candidate_ids": ["ligcand-clean"],
             "number_Ltype_connectors": 0,
             "number_Xtype_connectors": 2,
             "total_ligand_charge": -2,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k0",),
         },
         {
-            "ligand_info": [{"hanging_bonds": 3}],
+            "ligand_info": [li_residual],
             "candidate_ids": ["ligcand-residual"],
             "number_Ltype_connectors": 0,
             "number_Xtype_connectors": 2,
             "total_ligand_charge": -2,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k1",),
         },
     ]
 
-    scored = tmos_module._score_ligand_combinations_with_metal(tm_mol, combinations_in)
+    scored = tmos_module._score_and_flatten_states(tm_mol, combinations_in)
 
-    assert scored[0]["candidate_ids"] == ["ligcand-clean"]
-    assert (
-        scored[0]["metal_scoring"]["best_score"]
-        < scored[1]["metal_scoring"]["best_score"]
-    )
+    assert scored[0].ligands.candidate_ids == ["ligcand-clean"]
+    assert scored[0].score < scored[1].score
 
 
-def test_sanitize_complex_default_output_unchanged_without_all_candidates(monkeypatch):
+def test_sanitize_complex_returns_list_of_complex_states(monkeypatch):
+    """sanitize_complex should return a list of ComplexState objects sorted by score."""
     complex_mol = Chem.MolFromSmiles("[Fe]")
     ligand_fragment = Chem.MolFromSmiles("[CH3][I]")
     metal_fragment = Chem.MolFromSmiles("[Fe]")
@@ -304,278 +297,127 @@ def test_sanitize_complex_default_output_unchanged_without_all_candidates(monkey
     monkeypatch.setattr(
         tmos_module,
         "get_geometry_from_mol",
-        lambda *_args, **kwargs: ("square-planar", 4, {})
-        if kwargs.get("mode") == "angles"
-        else ("square-planar", 4, {}),
+        lambda *_args, **kwargs: ("square-planar", 4, {}),
     )
 
-    ligand_best = {
-        "candidate_id": "ligcand-best",
-        "rdmol": ligand_fragment,
-        "smiles": "[CH3][I]",
-        "chemical_formula": "C1H3I1",
-        "L-type connectors": [42],
-        "X-type connectors": [],
-        "total_charge": 0,
-        "hanging_bonds": 0,
-        "charged_atoms": {},
-    }
+    li_best = tmos_module.LigandInfo(
+        candidate_id="ligcand-best",
+        rdmol=ligand_fragment,
+        smiles="[CH3][I]",
+        chemical_formula="C1H3I1",
+        l_type_connectors=[42],
+        x_type_connectors=[],
+        total_charge=0,
+        hanging_bonds=0,
+        charged_atoms={},
+    )
     monkeypatch.setattr(
-        tmos_module,
-        "get_ligand_attributes",
-        lambda *_args, **kwargs: [ligand_best]
-        if kwargs.get("return_all_candidates")
-        else ligand_best,
+        tmos_module, "get_ligand_attributes", lambda *_args, **_kwargs: [li_best]
     )
 
-    combinations_out = [
-        {
-            "ligand_info": [ligand_best],
-            "candidate_ids": ["ligcand-best"],
-            "number_Ltype_connectors": 1,
-            "number_Xtype_connectors": 0,
-            "total_ligand_charge": 0,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k0",),
-        }
-    ]
+    sc = tmos_module.ScoreComponents(
+        target_complex_charge=0,
+        target_electron_count=18,
+        oxidation_membership_penalty=0,
+        charge_consistency_penalty=2,
+        electron_count_penalty=0,
+        residual_valence_penalty=0,
+        negative_charge_with_xtype_penalty=0,
+    )
+    mi = tmos_module.MetalInfo(
+        symbol="Fe", oxidation_state=2, charge=2, electron_count=18
+    )
+    ls = tmos_module.LigandSummary(
+        ligand_info=[li_best],
+        candidate_ids=["ligcand-best"],
+        number_Ltype_connectors=1,
+        number_Xtype_connectors=0,
+        total_charge=0,
+    )
     scored_out = [
-        {
-            **combinations_out[0],
-            "metal_scoring": {
-                "target_complex_charge": 0,
-                "target_electron_count": 18,
-                "state_scores": [
-                    {
-                        "oxidation_state": 2,
-                        "tm_charge": 2,
-                        "tm_electron_count": 18,
-                        "predicted_complex_charge": 2,
-                        "score_components": {
-                            "oxidation_membership_penalty": 0,
-                            "charge_consistency_penalty": 2,
-                            "electron_count_penalty": 0,
-                            "residual_valence_penalty": 0,
-                        },
-                        "score": 200,
-                    }
-                ],
-                "best_state": {
-                    "oxidation_state": 2,
-                    "tm_charge": 2,
-                    "tm_electron_count": 18,
-                    "predicted_complex_charge": 2,
-                    "score_components": {},
-                    "score": 200,
-                },
-                "best_score": 200,
-            },
-        }
+        tmos_module.ComplexState(
+            score=200,
+            score_components=sc,
+            predicted_complex_charge=2,
+            metal=mi,
+            ligands=ls,
+        )
     ]
+
     monkeypatch.setattr(
-        tmos_module,
-        "_enumerate_ligand_combinations",
-        lambda *_args, **_kwargs: combinations_out,
+        tmos_module, "_enumerate_ligand_combinations", lambda *_a, **_k: [{}]
     )
     monkeypatch.setattr(
-        tmos_module,
-        "_score_ligand_combinations_with_metal",
-        lambda *_args, **_kwargs: scored_out,
+        tmos_module, "_score_and_flatten_states", lambda *_a, **_k: scored_out
     )
     monkeypatch.setattr(
         tmos_module,
         "reform_metal_complex",
-        lambda *_args, **_kwargs: Chem.MolFromSmiles("[Fe]"),
+        lambda *_a, **_k: Chem.MolFromSmiles("[Fe]"),
     )
-    monkeypatch.setattr(tmos_module, "mol_to_smiles", lambda *_args, **_kwargs: "[Fe]")
-    monkeypatch.setattr(
-        tmos_module,
-        "get_molecular_formula",
-        lambda *_args, **_kwargs: "Fe1",
-    )
+    monkeypatch.setattr(tmos_module, "mol_to_smiles", lambda *_a, **_k: "[Fe]")
+    monkeypatch.setattr(tmos_module, "get_molecular_formula", lambda *_a, **_k: "Fe1")
 
-    outputs = tmos_module.sanitize_complex(complex_mol)
+    outputs = tmos_module.sanitize_complex(complex_mol, score_cutoff=None)
 
-    assert "__all_candidates__" not in outputs
-    assert len(outputs) >= 1
-
-
-def test_sanitize_complex_return_all_candidates_payload(monkeypatch):
-    complex_mol = Chem.MolFromSmiles("[Fe]")
-    ligand_fragment = Chem.MolFromSmiles("[CH3][I]")
-    metal_fragment = Chem.MolFromSmiles("[Fe]")
-
-    for atom in ligand_fragment.GetAtoms():
-        if atom.GetSymbol() == "I":
-            atom.SetIntProp("__original_index", -1)
-        else:
-            atom.SetIntProp("__original_index", 42)
-    metal_fragment.GetAtomWithIdx(0).SetIntProp("__original_index", 0)
-
-    monkeypatch.setattr(
-        tmos_module, "prepare_complex", lambda *args, **kwargs: complex_mol
-    )
-    monkeypatch.setattr(tmos_module, "find_metal_index", lambda *_args, **_kwargs: 0)
-    monkeypatch.setattr(
-        tmos_module,
-        "cleave_mol_from_index",
-        lambda *_args, **_kwargs: ([ligand_fragment, metal_fragment], [42]),
-    )
-    monkeypatch.setattr(
-        tmos_module,
-        "get_geometry_from_mol",
-        lambda *_args, **kwargs: ("square-planar", 4, {})
-        if kwargs.get("mode") == "angles"
-        else ("square-planar", 4, {}),
-    )
-
-    ligand_best = {
-        "candidate_id": "ligcand-best",
-        "rdmol": ligand_fragment,
-        "smiles": "[CH3][I]",
-        "chemical_formula": "C1H3I1",
-        "L-type connectors": [42],
-        "X-type connectors": [],
-        "total_charge": 0,
-        "hanging_bonds": 0,
-        "charged_atoms": {},
-    }
-    monkeypatch.setattr(
-        tmos_module,
-        "get_ligand_attributes",
-        lambda *_args, **kwargs: [ligand_best]
-        if kwargs.get("return_all_candidates")
-        else ligand_best,
-    )
-
-    combinations_out = [
-        {
-            "ligand_info": [ligand_best],
-            "candidate_ids": ["ligcand-best"],
-            "number_Ltype_connectors": 1,
-            "number_Xtype_connectors": 0,
-            "total_ligand_charge": 0,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k0",),
-        }
-    ]
-    scored_out = [
-        {
-            **combinations_out[0],
-            "metal_scoring": {
-                "target_complex_charge": 0,
-                "target_electron_count": 18,
-                "state_scores": [
-                    {
-                        "oxidation_state": 2,
-                        "tm_charge": 2,
-                        "tm_electron_count": 18,
-                        "predicted_complex_charge": 2,
-                        "score_components": {
-                            "oxidation_membership_penalty": 0,
-                            "charge_consistency_penalty": 2,
-                            "electron_count_penalty": 0,
-                            "residual_valence_penalty": 0,
-                        },
-                        "score": 200,
-                    }
-                ],
-                "best_state": {
-                    "oxidation_state": 2,
-                    "tm_charge": 2,
-                    "tm_electron_count": 18,
-                    "predicted_complex_charge": 2,
-                    "score_components": {},
-                    "score": 200,
-                },
-                "best_score": 200,
-            },
-        }
-    ]
-    monkeypatch.setattr(
-        tmos_module,
-        "_enumerate_ligand_combinations",
-        lambda *_args, **_kwargs: combinations_out,
-    )
-    monkeypatch.setattr(
-        tmos_module,
-        "_score_ligand_combinations_with_metal",
-        lambda *_args, **_kwargs: scored_out,
-    )
-    monkeypatch.setattr(
-        tmos_module,
-        "reform_metal_complex",
-        lambda *_args, **_kwargs: Chem.MolFromSmiles("[Fe]"),
-    )
-    monkeypatch.setattr(tmos_module, "mol_to_smiles", lambda *_args, **_kwargs: "[Fe]")
-    monkeypatch.setattr(
-        tmos_module,
-        "get_molecular_formula",
-        lambda *_args, **_kwargs: "Fe1",
-    )
-
-    outputs = tmos_module.sanitize_complex(complex_mol, return_all_candidates=True)
-
-    assert "__all_candidates__" in outputs
-    all_candidates = outputs["__all_candidates__"]
-    assert all_candidates["count"] == 1
-    assert len(all_candidates["candidates"]) == 1
-    candidate = all_candidates["candidates"][0]
-    assert candidate["ligand_candidate_ids"] == ["ligcand-best"]
-    assert "score_components" in candidate
+    assert isinstance(outputs, list)
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], tmos_module.ComplexState)
+    assert outputs[0].score == 200
+    assert outputs[0].metal.symbol == "Fe"
 
 
 def test_enumerate_ligand_combinations_non_equivalent_remain_distinct():
-    ligand_1_a = {
-        "candidate_id": "ligcand-1a",
-        "chemical_formula": "C1H1N1",
-        "smiles": "[CH]=[N]",
-        "total_charge": 0,
-        "hanging_bonds": 0,
-        "charged_atoms": {},
-        "L-type connectors": [10],
-        "X-type connectors": [],
-    }
-    ligand_1_b = {
-        "candidate_id": "ligcand-1b",
-        "chemical_formula": "C1H1N1",
-        "smiles": "[CH][N-]",
-        "total_charge": -1,
-        "hanging_bonds": 0,
-        "charged_atoms": {0: {"formal_charge": -1}},
-        "L-type connectors": [],
-        "X-type connectors": [10],
-    }
-    ligand_2_a = {
-        "candidate_id": "ligcand-2a",
-        "chemical_formula": "C1H1O1",
-        "smiles": "[CH]=[O]",
-        "total_charge": 0,
-        "hanging_bonds": 0,
-        "charged_atoms": {},
-        "L-type connectors": [20],
-        "X-type connectors": [],
-    }
-    ligand_2_b = {
-        "candidate_id": "ligcand-2b",
-        "chemical_formula": "C1H1O1",
-        "smiles": "[CH][O-]",
-        "total_charge": -1,
-        "hanging_bonds": 0,
-        "charged_atoms": {0: {"formal_charge": -1}},
-        "L-type connectors": [],
-        "X-type connectors": [20],
-    }
+    ligand_1_a = tmos_module.LigandInfo(
+        candidate_id="ligcand-1a",
+        smiles="[CH]=[N]",
+        chemical_formula="C1H1N1",
+        total_charge=0,
+        hanging_bonds=0,
+        charged_atoms={},
+        l_type_connectors=[10],
+        x_type_connectors=[],
+    )
+    ligand_1_b = tmos_module.LigandInfo(
+        candidate_id="ligcand-1b",
+        smiles="[CH][N-]",
+        chemical_formula="C1H1N1",
+        total_charge=-1,
+        hanging_bonds=0,
+        charged_atoms={0: {"formal_charge": -1}},
+        l_type_connectors=[],
+        x_type_connectors=[10],
+    )
+    ligand_2_a = tmos_module.LigandInfo(
+        candidate_id="ligcand-2a",
+        smiles="[CH]=[O]",
+        chemical_formula="C1H1O1",
+        total_charge=0,
+        hanging_bonds=0,
+        charged_atoms={},
+        l_type_connectors=[20],
+        x_type_connectors=[],
+    )
+    ligand_2_b = tmos_module.LigandInfo(
+        candidate_id="ligcand-2b",
+        smiles="[CH][O-]",
+        chemical_formula="C1H1O1",
+        total_charge=-1,
+        hanging_bonds=0,
+        charged_atoms={0: {"formal_charge": -1}},
+        l_type_connectors=[],
+        x_type_connectors=[20],
+    )
 
     combinations_out = tmos_module._enumerate_ligand_combinations(
         [[ligand_1_a, ligand_1_b], [ligand_2_a, ligand_2_b]]
     )
 
     assert len(combinations_out) == 4
-    assert all(x["dedupe_group_ids"] == ["g0", "g1"] for x in combinations_out)
 
 
-def test_sanitize_complex_all_candidates_retains_charged_ligand_assignment(monkeypatch):
+def test_sanitize_complex_two_candidates_both_retained(monkeypatch):
+    """Both ligand assignments should appear when score_cutoff is permissive."""
     complex_mol = Chem.MolFromSmiles("[Fe]")
     ligand_fragment = Chem.MolFromSmiles("[CH3][I]")
     metal_fragment = Chem.MolFromSmiles("[Fe]")
@@ -587,163 +429,175 @@ def test_sanitize_complex_all_candidates_retains_charged_ligand_assignment(monke
             atom.SetIntProp("__original_index", 42)
     metal_fragment.GetAtomWithIdx(0).SetIntProp("__original_index", 0)
 
-    monkeypatch.setattr(
-        tmos_module, "prepare_complex", lambda *args, **kwargs: complex_mol
-    )
-    monkeypatch.setattr(tmos_module, "find_metal_index", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(tmos_module, "prepare_complex", lambda *a, **k: complex_mol)
+    monkeypatch.setattr(tmos_module, "find_metal_index", lambda *a, **k: 0)
     monkeypatch.setattr(
         tmos_module,
         "cleave_mol_from_index",
-        lambda *_args, **_kwargs: ([ligand_fragment, metal_fragment], [42]),
+        lambda *a, **k: ([ligand_fragment, metal_fragment], [42]),
     )
     monkeypatch.setattr(
-        tmos_module,
-        "get_geometry_from_mol",
-        lambda *_args, **kwargs: ("square-planar", 4, {})
-        if kwargs.get("mode") == "angles"
-        else ("square-planar", 4, {}),
+        tmos_module, "get_geometry_from_mol", lambda *a, **k: ("square-planar", 4, {})
     )
 
-    ligand_neutral = {
-        "candidate_id": "ligcand-neutral",
-        "rdmol": ligand_fragment,
-        "smiles": "[CH3][I]",
-        "chemical_formula": "C1H3I1",
-        "L-type connectors": [42],
-        "X-type connectors": [],
-        "total_charge": 0,
-        "hanging_bonds": 0,
-        "charged_atoms": {},
-    }
-    ligand_charged = {
-        "candidate_id": "ligcand-charged",
-        "rdmol": ligand_fragment,
-        "smiles": "[CH2-][I]",
-        "chemical_formula": "C1H2I1",
-        "L-type connectors": [],
-        "X-type connectors": [42],
-        "total_charge": -1,
-        "hanging_bonds": 0,
-        "charged_atoms": {0: {"formal_charge": -1}},
-    }
+    li_neutral = tmos_module.LigandInfo(
+        candidate_id="ligcand-neutral",
+        rdmol=ligand_fragment,
+        smiles="[CH3][I]",
+        chemical_formula="C1H3I1",
+        l_type_connectors=[42],
+        x_type_connectors=[],
+        total_charge=0,
+        hanging_bonds=0,
+        charged_atoms={},
+    )
+    li_charged = tmos_module.LigandInfo(
+        candidate_id="ligcand-charged",
+        rdmol=ligand_fragment,
+        smiles="[CH2-][I]",
+        chemical_formula="C1H2I1",
+        l_type_connectors=[],
+        x_type_connectors=[42],
+        total_charge=-1,
+        hanging_bonds=0,
+        charged_atoms={0: {"formal_charge": -1}},
+    )
     monkeypatch.setattr(
-        tmos_module,
-        "get_ligand_attributes",
-        lambda *_args, **kwargs: [ligand_neutral, ligand_charged]
-        if kwargs.get("return_all_candidates")
-        else ligand_neutral,
+        tmos_module, "get_ligand_attributes", lambda *a, **k: [li_neutral, li_charged]
     )
 
-    combinations_out = [
-        {
-            "ligand_info": [ligand_neutral],
-            "candidate_ids": ["ligcand-neutral"],
-            "number_Ltype_connectors": 1,
-            "number_Xtype_connectors": 0,
-            "total_ligand_charge": 0,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k0",),
-        },
-        {
-            "ligand_info": [ligand_charged],
-            "candidate_ids": ["ligcand-charged"],
-            "number_Ltype_connectors": 0,
-            "number_Xtype_connectors": 1,
-            "total_ligand_charge": -1,
-            "dedupe_group_ids": ["g0"],
-            "dedupe_key": ("k1",),
-        },
-    ]
+    def _state(candidate_id, li, score):
+        sc = tmos_module.ScoreComponents(
+            target_complex_charge=0,
+            target_electron_count=18,
+            oxidation_membership_penalty=0,
+            charge_consistency_penalty=score // 100,
+            electron_count_penalty=0,
+            residual_valence_penalty=0,
+            negative_charge_with_xtype_penalty=0,
+        )
+        mi = tmos_module.MetalInfo(
+            symbol="Fe", oxidation_state=2, charge=2, electron_count=18
+        )
+        ls = tmos_module.LigandSummary(
+            ligand_info=[li],
+            candidate_ids=[candidate_id],
+            number_Ltype_connectors=len(li.l_type_connectors),
+            number_Xtype_connectors=len(li.x_type_connectors),
+            total_charge=li.total_charge,
+        )
+        return tmos_module.ComplexState(
+            score=score,
+            score_components=sc,
+            predicted_complex_charge=2,
+            metal=mi,
+            ligands=ls,
+        )
+
     scored_out = [
-        {
-            **combinations_out[0],
-            "metal_scoring": {
-                "target_complex_charge": 0,
-                "target_electron_count": 18,
-                "state_scores": [
-                    {
-                        "oxidation_state": 2,
-                        "tm_charge": 2,
-                        "tm_electron_count": 18,
-                        "predicted_complex_charge": 2,
-                        "score_components": {
-                            "oxidation_membership_penalty": 0,
-                            "charge_consistency_penalty": 2,
-                            "electron_count_penalty": 0,
-                            "residual_valence_penalty": 0,
-                        },
-                        "score": 200,
-                    }
-                ],
-                "best_state": {
-                    "oxidation_state": 2,
-                    "tm_charge": 2,
-                    "tm_electron_count": 18,
-                    "predicted_complex_charge": 2,
-                    "score_components": {},
-                    "score": 200,
-                },
-                "best_score": 200,
-            },
-        },
-        {
-            **combinations_out[1],
-            "metal_scoring": {
-                "target_complex_charge": 0,
-                "target_electron_count": 18,
-                "state_scores": [
-                    {
-                        "oxidation_state": 3,
-                        "tm_charge": 3,
-                        "tm_electron_count": 17,
-                        "predicted_complex_charge": 2,
-                        "score_components": {
-                            "oxidation_membership_penalty": 0,
-                            "charge_consistency_penalty": 2,
-                            "electron_count_penalty": 1,
-                            "residual_valence_penalty": 0,
-                        },
-                        "score": 210,
-                    }
-                ],
-                "best_state": {
-                    "oxidation_state": 3,
-                    "tm_charge": 3,
-                    "tm_electron_count": 17,
-                    "predicted_complex_charge": 2,
-                    "score_components": {},
-                    "score": 210,
-                },
-                "best_score": 210,
-            },
-        },
+        _state("ligcand-neutral", li_neutral, 200),
+        _state("ligcand-charged", li_charged, 210),
     ]
     monkeypatch.setattr(
-        tmos_module,
-        "_enumerate_ligand_combinations",
-        lambda *_args, **_kwargs: combinations_out,
+        tmos_module, "_enumerate_ligand_combinations", lambda *a, **k: [{}, {}]
     )
     monkeypatch.setattr(
-        tmos_module,
-        "_score_ligand_combinations_with_metal",
-        lambda *_args, **_kwargs: scored_out,
+        tmos_module, "_score_and_flatten_states", lambda *a, **k: scored_out
     )
     monkeypatch.setattr(
-        tmos_module,
-        "reform_metal_complex",
-        lambda *_args, **_kwargs: Chem.MolFromSmiles("[Fe]"),
+        tmos_module, "reform_metal_complex", lambda *a, **k: Chem.MolFromSmiles("[Fe]")
     )
-    monkeypatch.setattr(tmos_module, "mol_to_smiles", lambda *_args, **_kwargs: "[Fe]")
-    monkeypatch.setattr(
-        tmos_module,
-        "get_molecular_formula",
-        lambda *_args, **_kwargs: "Fe1",
+    monkeypatch.setattr(tmos_module, "mol_to_smiles", lambda *a, **k: "[Fe]")
+    monkeypatch.setattr(tmos_module, "get_molecular_formula", lambda *a, **k: "Fe1")
+
+    outputs = tmos_module.sanitize_complex(
+        complex_mol, score_cutoff=None, n_results=None
     )
 
-    outputs = tmos_module.sanitize_complex(complex_mol, return_all_candidates=True)
+    candidate_ids = [s.ligands.candidate_ids[0] for s in outputs]
+    assert "ligcand-neutral" in candidate_ids
+    assert "ligcand-charged" in candidate_ids
 
-    assert "__all_candidates__" in outputs
-    all_candidates = outputs["__all_candidates__"]["candidates"]
-    candidate_ids = [tuple(x["ligand_candidate_ids"]) for x in all_candidates]
-    assert ("ligcand-neutral",) in candidate_ids
-    assert ("ligcand-charged",) in candidate_ids
+
+def test_sanitize_complex_score_cutoff_filters_states(monkeypatch):
+    """States with score >= score_cutoff should be excluded from the output."""
+    complex_mol = Chem.MolFromSmiles("[Fe]")
+    ligand_fragment = Chem.MolFromSmiles("[CH3][I]")
+    metal_fragment = Chem.MolFromSmiles("[Fe]")
+
+    for atom in ligand_fragment.GetAtoms():
+        if atom.GetSymbol() == "I":
+            atom.SetIntProp("__original_index", -1)
+        else:
+            atom.SetIntProp("__original_index", 42)
+    metal_fragment.GetAtomWithIdx(0).SetIntProp("__original_index", 0)
+
+    monkeypatch.setattr(tmos_module, "prepare_complex", lambda *a, **k: complex_mol)
+    monkeypatch.setattr(tmos_module, "find_metal_index", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        tmos_module,
+        "cleave_mol_from_index",
+        lambda *a, **k: ([ligand_fragment, metal_fragment], [42]),
+    )
+    monkeypatch.setattr(
+        tmos_module, "get_geometry_from_mol", lambda *a, **k: ("octahedral", 6, {})
+    )
+
+    li = tmos_module.LigandInfo(
+        candidate_id="ligcand-co",
+        rdmol=ligand_fragment,
+        smiles="[CH3][I]",
+        chemical_formula="C1H3I1",
+        l_type_connectors=[42],
+        x_type_connectors=[],
+        total_charge=0,
+        hanging_bonds=0,
+        charged_atoms={},
+    )
+    monkeypatch.setattr(tmos_module, "get_ligand_attributes", lambda *a, **k: [li])
+    monkeypatch.setattr(
+        tmos_module, "reform_metal_complex", lambda *a, **k: Chem.MolFromSmiles("[Fe]")
+    )
+    monkeypatch.setattr(tmos_module, "mol_to_smiles", lambda *a, **k: "[Fe]")
+    monkeypatch.setattr(tmos_module, "get_molecular_formula", lambda *a, **k: "Fe1")
+
+    def _make_state(score):
+        sc = tmos_module.ScoreComponents(
+            target_complex_charge=0,
+            target_electron_count=18,
+            oxidation_membership_penalty=score // 1000,
+            charge_consistency_penalty=0,
+            electron_count_penalty=0,
+            residual_valence_penalty=0,
+            negative_charge_with_xtype_penalty=0,
+        )
+        mi = tmos_module.MetalInfo(
+            symbol="Fe", oxidation_state=2, charge=2, electron_count=18
+        )
+        ls = tmos_module.LigandSummary(
+            ligand_info=[li],
+            candidate_ids=["ligcand-co"],
+            number_Ltype_connectors=1,
+            number_Xtype_connectors=0,
+            total_charge=0,
+        )
+        return tmos_module.ComplexState(
+            score=score,
+            score_components=sc,
+            predicted_complex_charge=2,
+            metal=mi,
+            ligands=ls,
+        )
+
+    scored_out = [_make_state(0), _make_state(1000)]
+    monkeypatch.setattr(
+        tmos_module, "_enumerate_ligand_combinations", lambda *a, **k: [{}]
+    )
+    monkeypatch.setattr(
+        tmos_module, "_score_and_flatten_states", lambda *a, **k: scored_out
+    )
+
+    outputs = tmos_module.sanitize_complex(complex_mol, score_cutoff=1000)
+
+    assert len(outputs) == 1
+    assert outputs[0].score == 0

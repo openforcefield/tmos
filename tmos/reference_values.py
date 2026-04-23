@@ -15,6 +15,9 @@ import numpy as np
 
 from rdkit import Chem
 
+# METALS_NUM gates which atoms are treated as metal centers throughout the codebase.
+# When adding a new element, also add entries to expected_oxidation_states and group_numbers
+# below. transition_metal_covalent_radii is optional but improves bond detection.
 METALS_NUM = [
     3,
     12,
@@ -100,6 +103,10 @@ transition_metal_covalent_radii = {
     "Hg": 1.32,
 }
 
+# expected_oxidation_states controls the oxidation_membership_penalty in scoring
+# (weighted ×1000). States outside this list are heavily penalized but not excluded.
+# Lists must be sorted ascending. When adding negative oxidation states,
+# also review the charge_consistency_penalty logic in _score_and_flatten_states.
 expected_oxidation_states = {
     "Li": [1],
     "Mg": [2],
@@ -107,10 +114,10 @@ expected_oxidation_states = {
     "Sc": [3],
     "Ti": [2, 3, 4],
     "V": [2, 3, 4, 5],
-    "Cr": [0, 1, 2, 3, 4, 5, 6],
-    "Mn": [2, 3, 4, 5, 6],
-    "Fe": [2, 3, 4],
-    "Co": [0, 1, 2, 3],
+    "Cr": [-2, 0, 1, 2, 3, 4, 5, 6],  # e.g. [Cr(CO)5]2-
+    "Mn": [-1, 2, 3, 4, 5, 6],  # e.g. [Mn(CO)5]-
+    "Fe": [-2, -1, 2, 3, 4],  # e.g. [Fe(CO)4]2-, [HFe(CO)4]-
+    "Co": [-1, 0, 1, 2, 3],  # e.g. [Co(CO)4]-
     "Ni": [0, 1, 2, 3],
     "Cu": [1, 2, 3],
     "Zn": [2],
@@ -118,7 +125,7 @@ expected_oxidation_states = {
     "Y": [3],
     "Zr": [2, 3, 4],
     "Nb": [2, 3, 4, 5],
-    "Mo": [0, 1, 2, 3, 4, 5, 6],
+    "Mo": [-2, 0, 1, 2, 3, 4, 5, 6],  # e.g. [Mo(CO)5]2-
     "Tc": [2, 3, 4, 5, 6],
     "Ru": [2, 3, 4],
     "Rh": [0, 1, 2, 3],
@@ -128,8 +135,8 @@ expected_oxidation_states = {
     # Transition metals (third row)
     "Hf": [2, 3, 4],
     "Ta": [2, 3, 4, 5],
-    "W": [0, 1, 2, 3, 4, 5, 6],
-    "Re": [2, 3, 4, 5, 6],
+    "W": [-2, 0, 1, 2, 3, 4, 5, 6],  # e.g. [W(CO)5]2-
+    "Re": [-1, 2, 3, 4, 5, 6],  # e.g. [Re(CO)5]-
     "Os": [2, 3, 4],
     "Ir": [0, 1, 2, 3],
     "Pt": [0, 1, 2, 3],
@@ -138,6 +145,9 @@ expected_oxidation_states = {
 }
 
 
+# group_numbers provides the periodic-table group (1-12) used in the CBC electron
+# count formula: metal_charge = group_number + n_X_bonds + 2*n_L_bonds - n_electrons.
+# Every element in METALS_NUM must have an entry here.
 group_numbers = {
     "Li": 1,
     "Mg": 2,

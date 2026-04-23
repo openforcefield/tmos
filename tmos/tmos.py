@@ -134,6 +134,13 @@ class ScoreComponents:
     residual_valence_penalty : int
         Sum of ``hanging_bonds`` across all ligand candidates in this
         assignment. Weighted ×1 in the total score.
+    negative_charge_with_xtype_penalty : int
+        1 if ``metal_charge < 0`` and ``n_xtype > 0``, 0 otherwise.
+        X-type bonds are covalent σ-donors; each X bond withdraws an electron
+        from the ligand side toward the metal. Having both X-type donors *and*
+        a negative metal formal charge is physically contradictory — the X
+        assignment would have to be reversed to reach a negative oxidation
+        state. Weighted ×1000 in the total score.
     """
 
     target_complex_charge: int
@@ -142,6 +149,7 @@ class ScoreComponents:
     charge_consistency_penalty: int
     electron_count_penalty: int
     residual_valence_penalty: int
+    negative_charge_with_xtype_penalty: int
 
     @property
     def summary(self) -> str:
@@ -149,6 +157,7 @@ class ScoreComponents:
             [
                 f"Score components (target charge={self.target_complex_charge}, target electrons={self.target_electron_count}):",
                 f"  oxidation membership: {self.oxidation_membership_penalty} × 1000 = {1000 * self.oxidation_membership_penalty}",
+                f"  neg. charge + X-type: {self.negative_charge_with_xtype_penalty} × 1000 = {1000 * self.negative_charge_with_xtype_penalty}",
                 f"  charge consistency:   {self.charge_consistency_penalty} × 100 = {100 * self.charge_consistency_penalty}",
                 f"  electron count:       {self.electron_count_penalty} × 10 = {10 * self.electron_count_penalty}",
                 f"  residual valence:     {self.residual_valence_penalty} × 1 = {self.residual_valence_penalty}",
@@ -1432,9 +1441,15 @@ def _score_and_flatten_states(
             predicted_complex_charge = int(tm_chg) + total_ligand_charge
             charge_penalty = abs(predicted_complex_charge - target_complex_charge)
             electron_penalty = abs(int(tm_nel) - target_electron_count)
+            # X-type bonds withdraw electron density from ligands toward the metal;
+            # a negative metal formal charge alongside X-type donors is physically
+            # contradictory. Only L-type (π-acceptor) ligand fields can stabilize
+            # negative oxidation states (e.g. CO in carbonylate anions).
+            negative_xtype_penalty = 1 if int(tm_chg) < 0 and n_xtype > 0 else 0
 
             score = (
                 1000 * oxidation_penalty
+                + 1000 * negative_xtype_penalty
                 + 100 * charge_penalty
                 + 10 * electron_penalty
                 + residual_valence_penalty
@@ -1449,6 +1464,7 @@ def _score_and_flatten_states(
                         charge_consistency_penalty=int(charge_penalty),
                         electron_count_penalty=int(electron_penalty),
                         residual_valence_penalty=int(residual_valence_penalty),
+                        negative_charge_with_xtype_penalty=int(negative_xtype_penalty),
                     ),
                     predicted_complex_charge=int(predicted_complex_charge),
                     metal=MetalInfo(
