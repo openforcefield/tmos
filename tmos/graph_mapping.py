@@ -1,4 +1,35 @@
-"""Turn RDKit molecules into graphical representations, then perform comparisons and analyses."""
+"""Graph-based utilities for molecular comparison and structural analysis.
+
+RDKit molecules are converted to ``networkx.Graph`` objects so that
+standard graph algorithms can be applied — atom-index mapping between
+equivalent molecules, ring detection, and path enumeration.
+
+Main functions
+--------------
+:func:`mol_to_graph`
+    Converts an RDKit molecule to a ``networkx.Graph``.  Node IDs are
+    RDKit atom indices; each node carries ``symbol``, ``degree``, and
+    ``atom_idx`` attributes.
+:func:`find_atom_mapping`
+    Maps atom indices between two topologically equivalent molecules by
+    matching first-order environment keys (symbol, degree, sorted
+    neighbour symbols).  Used by
+    :func:`~tmos.build_rdmol.update_atom_bond_props` to transfer formal
+    charges and bond types from a reference molecule.
+:func:`implicit_hydrogen_atom_mapping`
+    Builds the index mapping between an explicit-H molecule and the
+    same molecule with implicit hydrogens; used as a fallback inside
+    :func:`~tmos.build_rdmol.update_atom_bond_props`.
+:func:`validate_mapping`
+    Checks that a ``find_atom_mapping`` result is bijective and preserves
+    every bond in both graphs; raises ``ValueError`` on any inconsistency.
+:func:`find_molecular_rings`
+    Returns all unique rings within a given size range from a molecule
+    graph's cycle basis.
+:func:`get_atom_environment`
+    Returns the local environment key ``(symbol, degree, neighbour_symbols)``
+    for a single atom; used as the bucketing key in :func:`find_atom_mapping`.
+"""
 
 from collections import defaultdict
 

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import tmos.build_rdmol as build_rdmol
-from tmos.diagnostic import analyze_graph_mismatch, format_graph_mismatch_report
+from tmos.tests.diagnostic import analyze_graph_mismatch, format_graph_mismatch_report
 from tmos.graph_mapping import mol_to_graph
 
 with open(Path(__file__).parent / "error_check4.json") as f:

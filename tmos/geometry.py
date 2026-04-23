@@ -1,3 +1,51 @@
+"""Coordination geometry detection for transition metal complexes.
+
+Given a central atom and its bonded neighbours in 3-D space, the functions in
+this module classify the local geometry (e.g. octahedral, tetrahedral,
+square-planar) and return a string label together with the coordination number.
+Four independent backends are provided so that the caller can trade accuracy
+against optional dependency requirements.
+
+Main function
+-------------
+:func:`get_geometry_from_mol`
+    Top-level entry point.  Accepts a fully-formed RDKit molecule and the index
+    of the central atom, isolates the first coordination sphere, and dispatches
+    to the chosen backend.  Returns a ``(geometry_label, n_bonds, local_mol)``
+    triple.  Called by :func:`~tmos.tmos.sanitize_complex` with
+    ``mode="angles"`` by default.
+
+Geometry methods and labels
+---------------------------
+``"angles"`` *(default, no extra dependency)*
+    Scores each candidate geometry by comparing the observed pairwise
+    ligand–metal–ligand angles against ideal templates in
+    :data:`~tmos.reference_values.ideal_angles`, averaged with an
+    orientation-tensor eigenvalue similarity against
+    :data:`~tmos.reference_values.coordinate_eigenvalues`.
+
+``"posym"`` *(optional: ``pip install posym``)*
+    Computes the Schoenflies point group with ``posym`` symmetry measures
+    and maps it to a geometry label via
+    :data:`~tmos.reference_values.geometry_point_group`.
+
+``"pymatgen"`` *(optional: ``pip install pymatgen``)*
+    Uses ``pymatgen``'s ``PointGroupAnalyzer`` to assign a Schoenflies
+    symbol, then maps it to a label via
+    :data:`~tmos.reference_values.geometry_point_group`.
+
+``"rylm"`` *(optional: install from GitHub)*
+    Computes rotational-invariant spherical-harmonic fingerprints and
+    finds the closest match in
+    :data:`~tmos.reference_values.steinhardt_order_parameters`.
+
+All backends return one of: ``"Linear"``, ``"Bent"``,
+``"Trigonal Planar"``, ``"Tetrahedral"``, ``"Square Planar"``,
+``"Trigonal Bipyramidal"``, ``"Square Pyramidal"``, ``"Octahedral"``,
+``"Ferrocene"``, ``"Monocoordinate"``, ``"Element"``, or
+``"Undetermined"`` when no template matches within tolerance.
+"""
+
 import numpy as np
 from rdkit import Chem
 from rdkit.Geometry import Point3D
