@@ -545,3 +545,34 @@ def test_determine_bonds_penalty_and_runtime(
         f"Runtime increased beyond 20% tolerance: {elapsed:.3f}s > "
         f"{reference['dt'] * 1.2:.3f}s"
     )
+
+
+def test_determine_bonds_openbabel_preserves_original_index_intprop() -> None:
+    if build_rdmol.ob is None:
+        pytest.skip("OpenBabel is not available")
+
+    symbols = ["O", "H", "H"]
+    coords = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.95, 0.0, 0.0],
+            [-0.3, 0.9, 0.0],
+        ]
+    )
+    mol = build_rdmol.xyz_to_rdkit(
+        symbols,
+        coords,
+        method="openbabel",
+        ignore_scale=True,
+    )
+
+    expected = []
+    for atom in mol.GetAtoms():
+        original_index = atom.GetIdx() + 100
+        atom.SetIntProp("__original_index", original_index)
+        expected.append(original_index)
+
+    out = build_rdmol.determine_bonds(mol, charge=0, method="openbabel")
+    actual = [a.GetIntProp("__original_index") for a in out.GetAtoms()]
+
+    assert actual == expected

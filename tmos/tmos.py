@@ -5,7 +5,10 @@ an arrow pushing script is produced here with custom checks for ferrocene struct
 """
 
 import copy
-from itertools import combinations
+import hashlib
+import json
+from dataclasses import dataclass
+from itertools import combinations, product
 from typing import TypeAlias
 from collections.abc import Sequence
 
@@ -30,7 +33,312 @@ from .reference_values import (
 from .geometry import get_geometry_from_mol
 
 ChargedAtoms: TypeAlias = dict[int, dict[str, object]]
-LigandInfo: TypeAlias = dict[str, object]
+
+
+@dataclass
+class LigandInfo:
+    """Properties of a single sanitized ligand candidate.
+
+    Produced by :func:`get_ligand_attributes`.
+
+    Attributes
+    ----------
+    index : int
+        Position of this candidate in the enumeration produced by
+        :func:`get_ligand_attributes`.
+    rdmol : object
+        RDKit molecule with bond orders assigned.
+    smiles : str
+        Canonical non-isomeric SMILES.
+    chemical_formula : str
+        Molecular formula string.
+    candidate_id : str
+        Content-addressed hash identifier built from SMILES, charge, connector
+        lists, and charged-atom information. See :func:`_build_candidate_id`.
+    total_charge : int
+        Net formal charge of the ligand as isolated from the metal.
+    hanging_bonds : int
+        Number of unsatisfied valences remaining after bond assignment; used as
+        a tie-breaking penalty in scoring.
+    charged_atoms : ChargedAtoms
+        Mapping from atom index to charge-related properties for every atom
+        carrying a non-zero formal charge.
+    l_type_connectors : list[int]
+        Original-molecule atom indices that bind the metal as neutral (L-type)
+        donors.
+    x_type_connectors : list[int]
+        Original-molecule atom indices that bind the metal as anionic (X-type)
+        donors.
+    """
+
+    index: int | None = None
+    rdmol: object | None = None
+    smiles: str | None = None
+    chemical_formula: str | None = None
+    candidate_id: str | None = None
+    total_charge: int | None = None
+    hanging_bonds: int | None = None
+    charged_atoms: ChargedAtoms | None = None
+    l_type_connectors: list[int] | None = None
+    x_type_connectors: list[int] | None = None
+
+    @property
+    def summary(self) -> str:
+        smiles_str = self.smiles if self.smiles is not None else "?"
+        charge = self.total_charge if self.total_charge is not None else 0
+        charge_str = f"+{charge}" if charge > 0 else str(charge)
+        n_l = len(self.l_type_connectors) if self.l_type_connectors is not None else 0
+        n_x = len(self.x_type_connectors) if self.x_type_connectors is not None else 0
+        hb = self.hanging_bonds if self.hanging_bonds is not None else 0
+        l_list = (
+            str(self.l_type_connectors) if self.l_type_connectors is not None else "[]"
+        )
+        x_list = (
+            str(self.x_type_connectors) if self.x_type_connectors is not None else "[]"
+        )
+        n_charged = len(self.charged_atoms) if self.charged_atoms is not None else 0
+        return "\n".join(
+            [
+                f"{smiles_str}\ncharge={charge_str}, {n_l}L/{n_x}X connectors, {hb} hanging bond(s)",
+                f"  L-type: {l_list}",
+                f"  X-type: {x_list}",
+                f"  Charged atoms: {n_charged} atom(s)",
+            ]
+        )
+
+
+@dataclass
+class ScoreComponents:
+    """Decomposed scoring inputs and penalties for a single :class:`ComplexState`.
+
+    Produced by :func:`_score_and_flatten_states` and stored under
+    ``ComplexState.score_components``.
+
+    Attributes
+    ----------
+    target_complex_charge : int
+        Desired net charge of the complex, usually passed from :func:`sanitize_complex`.
+    target_electron_count : int
+        Desired electron count at the metal center, usually passed from
+        :func:`sanitize_complex`.
+    oxidation_membership_penalty : int
+        1 if the predicted oxidation state is outside the expected set for the
+        metal (from ``expected_oxidation_states``), 0 otherwise. Weighted
+        ×1000 in the total score.
+    charge_consistency_penalty : int
+        ``|predicted_complex_charge - target_complex_charge|``. Weighted ×100
+        in the total score.
+    electron_count_penalty : int
+        ``|metal_electron_count - target_electron_count|``. Weighted ×10 in
+        the total score.
+    residual_valence_penalty : int
+        Sum of ``hanging_bonds`` across all ligand candidates in this
+        assignment. Weighted ×1 in the total score.
+    """
+
+    target_complex_charge: int
+    target_electron_count: int
+    oxidation_membership_penalty: int
+    charge_consistency_penalty: int
+    electron_count_penalty: int
+    residual_valence_penalty: int
+
+    @property
+    def summary(self) -> str:
+        return "\n".join(
+            [
+                f"Score components (target charge={self.target_complex_charge}, target electrons={self.target_electron_count}):",
+                f"  oxidation membership: {self.oxidation_membership_penalty} × 1000 = {1000 * self.oxidation_membership_penalty}",
+                f"  charge consistency:   {self.charge_consistency_penalty} × 100 = {100 * self.charge_consistency_penalty}",
+                f"  electron count:       {self.electron_count_penalty} × 10 = {10 * self.electron_count_penalty}",
+                f"  residual valence:     {self.residual_valence_penalty} × 1 = {self.residual_valence_penalty}",
+            ]
+        )
+
+
+@dataclass
+class MetalInfo:
+    """Properties of the transition-metal center.
+
+    Produced by :func:`_score_and_flatten_states` via :func:`get_tm_attributes`
+    and stored under ``ComplexState.metal``.
+
+    Attributes
+    ----------
+    symbol : str
+        Atomic symbol of the metal (e.g. ``"Fe"``).
+    oxidation_state : int
+        Predicted formal oxidation state.
+    charge : int
+        Formal charge applied to the metal atom in the assembled complex.
+        Related to ``oxidation_state`` by the ligand field contribution.
+    electron_count : int
+        Total d-electron count at the metal center under the predicted
+        oxidation state and ligand combination.
+    """
+
+    symbol: str
+    oxidation_state: int
+    charge: int
+    electron_count: int
+
+    @property
+    def summary(self) -> str:
+        charge_str = f"+{self.charge}" if self.charge > 0 else str(self.charge)
+        ox_str = (
+            f"+{self.oxidation_state}"
+            if self.oxidation_state > 0
+            else str(self.oxidation_state)
+        )
+        return f"{self.symbol}({ox_str}), charge={charge_str}, {self.electron_count} electron(s)"
+
+
+@dataclass
+class LigandSummary:
+    """Aggregate ligand-field information for a single :class:`ComplexState`.
+
+    Produced by :func:`_score_and_flatten_states` from a ligand combination
+    enumerated by :func:`_enumerate_ligand_combinations` and stored under
+    ``ComplexState.ligands``.
+
+    Attributes
+    ----------
+    ligand_info : list[LigandInfo]
+        One :class:`LigandInfo` per ligand in the complex, in the order they
+        appear in the input molecule.
+    candidate_ids : list[str]
+        Ordered ``candidate_id`` values matching ``ligand_info``; used for
+        deduplication keying.
+    number_Ltype_connectors : int
+        Total count of neutral (L-type) donor sites across all ligands.
+    number_Xtype_connectors : int
+        Total count of anionic (X-type) donor sites across all ligands.
+    total_charge : int
+        Sum of ``total_charge`` from every :class:`LigandInfo` entry.
+    """
+
+    ligand_info: list[LigandInfo]
+    candidate_ids: list[str]
+    number_Ltype_connectors: int
+    number_Xtype_connectors: int
+    total_charge: int
+
+    @property
+    def summary(self) -> str:
+        charge_str = (
+            f"+{self.total_charge}" if self.total_charge > 0 else str(self.total_charge)
+        )
+        return f"{len(self.ligand_info)} ligand(s), {self.number_Ltype_connectors}L/{self.number_Xtype_connectors}X donors, total charge={charge_str}"
+
+
+@dataclass
+class ComplexInfo:
+    """Assembled-complex properties for a single :class:`ComplexState`.
+
+    Attributes
+    ----------
+    rdmol : object
+        Fully assembled RDKit molecule returned by :func:`reform_metal_complex`.
+    smiles : str
+        Canonical non-isomeric SMILES of the assembled complex.
+    formula : str
+        Molecular formula of the assembled complex.
+    charge : int
+        Net formal charge of the assembled complex (sum of all atom formal
+        charges).
+    number_metal_connections : int
+        Number of bonds to the metal center as determined by
+        :func:`~tmos.geometry.get_geometry_from_mol`.
+    geometry_type : str
+        Geometry label predicted by :func:`~tmos.geometry.get_geometry_from_mol`
+        using the method selected by the ``geometry_method`` argument of
+        :func:`sanitize_complex`.
+    """
+
+    rdmol: object | None = None
+    smiles: str | None = None
+    formula: str | None = None
+    charge: int | None = None
+    number_metal_connections: int | None = None
+    geometry_type: str | None = None
+
+    @property
+    def summary(self) -> str:
+        formula_str = self.formula if self.formula is not None else "?"
+        charge = self.charge if self.charge is not None else 0
+        charge_str = f"+{charge}" if charge > 0 else str(charge)
+        geom = self.geometry_type if self.geometry_type is not None else "?"
+        n_bonds = (
+            self.number_metal_connections
+            if self.number_metal_connections is not None
+            else 0
+        )
+        return f"{formula_str}, charge={charge_str}, {geom} ({n_bonds} bond(s))"
+
+
+@dataclass
+class ComplexState:
+    """A single scored candidate state for a transition metal complex.
+
+    The top-level return type of :func:`sanitize_complex`. Each entry
+    represents one (ligand assignment, oxidation state) pair. States are sorted
+    by ``score`` ascending (lower is better). The ``complex`` field is absent
+    until after filtering inside :func:`sanitize_complex`.
+
+    Attributes
+    ----------
+    score : int
+        Weighted sum of all penalties in :class:`ScoreComponents`::
+
+            1000 * oxidation_membership_penalty
+            + 100 * charge_consistency_penalty
+            +  10 * electron_count_penalty
+            +   1 * residual_valence_penalty
+
+    score_components : ScoreComponents
+        Decomposed scoring inputs and per-component penalties. See
+        :class:`ScoreComponents`.
+    predicted_complex_charge : int
+        ``metal.charge + ligands.total_charge`` for this state.
+    metal : MetalInfo
+        Metal-center properties (symbol, oxidation state, charge, electron
+        count). See :class:`MetalInfo`.
+    ligands : LigandSummary
+        Aggregated ligand-field information (connector counts, total charge,
+        per-ligand details). See :class:`LigandSummary`.
+    complex : ComplexInfo
+        Assembled-complex properties (rdmol, SMILES, formula, geometry).
+        Populated after filtering in :func:`sanitize_complex`. See
+        :class:`ComplexInfo`.
+    """
+
+    score: int | None = None
+    score_components: ScoreComponents | None = None
+    predicted_complex_charge: int | None = None
+    metal: MetalInfo | None = None
+    ligands: LigandSummary | None = None
+    complex: ComplexInfo | None = None
+
+    @property
+    def summary(self) -> str:
+        score_str = str(self.score) if self.score is not None else "?"
+        lines = [f"Score: {score_str}"]
+        if self.metal is not None:
+            lines.append(f"  Metal: {self.metal.summary}")
+        if self.ligands is not None:
+            lines.append(f"  Ligands: {self.ligands.summary}")
+        if self.complex is not None:
+            lines.append(f"  Complex: {self.complex.summary}")
+        if self.score_components is not None:
+            sc = self.score_components
+            lines.append(
+                f"  Penalties: oxid={sc.oxidation_membership_penalty}×1000, "
+                f"charge={sc.charge_consistency_penalty}×100, "
+                f"elec={sc.electron_count_penalty}×10, "
+                f"valence={sc.residual_valence_penalty}×1"
+            )
+        return "\n".join(lines)
+
 
 # Initialize logger with INFO level by default
 configure_logger("INFO")
@@ -156,7 +464,7 @@ def mol_to_smiles(mol: Chem.rdchem.Mol) -> str:
 
 def wipe_molecule(mol: Chem.rdchem.Mol) -> Chem.rdchem.Mol:
     """Wipe all bond order and aromatic information from a molecule so that only single
-    bonds remain.
+    bonds remain between uncharged atoms.
 
     Parameters
     ----------
@@ -209,7 +517,7 @@ def check_ligand_exception(
     """
     mol = Chem.RWMol(copy.deepcopy(mol))
     Chem.SetAromaticity(mol, Chem.AromaticityModel.AROMATICITY_MDL)
-    # Assume there is one
+    # Assume there is a metal
     metal_connected_orig_indices = [
         atm.GetIntProp("__original_index")
         for atm in mol.GetAtoms()
@@ -327,7 +635,7 @@ def sanitize_ligand(
         - openbabel: ``PerceiveBondOrders``
 
     charge : int, default=None
-        If using RDKit for bond orders, optionally set the charge. If set to 0, some atoms may be defined as radicals.
+        If using RDKit for bond orders, optionally set the charge.
     sanitize : bool, default=True
         If True, the resulting molecule will be sanitized
 
@@ -341,7 +649,7 @@ def sanitize_ligand(
     mol_after = copy.deepcopy(mol)
     mol_after.UpdatePropertyCache(strict=False)
     if any(atm.GetNumImplicitHs() > 0 for atm in mol_after.GetAtoms()):
-        raise ValueError("Provided molecule has implicit hydrogen atoms.")
+        raise ValueError("Provided molecule should not have implicit hydrogen atoms.")
     mol_after = Chem.RWMol(mol_after)
     Chem.SetAromaticity(mol_after, Chem.AromaticityModel.AROMATICITY_MDL)
 
@@ -364,11 +672,47 @@ def sanitize_ligand(
     return mol_after
 
 
+def _normalize_charged_atoms(charged_atoms: ChargedAtoms) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    for atom_idx in sorted(charged_atoms):
+        atom_info = charged_atoms[atom_idx]
+        normalized.append(
+            {
+                "atom_index": int(atom_idx),
+                "info": {key: atom_info[key] for key in sorted(atom_info)},
+            }
+        )
+    return normalized
+
+
+def _build_candidate_id(candidate: LigandInfo) -> str:
+    assert candidate.l_type_connectors is not None
+    assert candidate.x_type_connectors is not None
+    assert candidate.smiles is not None
+    assert candidate.total_charge is not None
+    assert candidate.hanging_bonds is not None
+    assert candidate.charged_atoms is not None
+    l_connectors = candidate.l_type_connectors
+    x_connectors = candidate.x_type_connectors
+    payload = {
+        "smiles": candidate.smiles,
+        "total_charge": int(candidate.total_charge),
+        "hanging_bonds": int(candidate.hanging_bonds),
+        "l_type_connectors": sorted(l_connectors),
+        "x_type_connectors": sorted(x_connectors),
+        "charged_atoms": _normalize_charged_atoms(candidate.charged_atoms),
+    }
+    digest = hashlib.sha1(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"ligcand-{digest}"
+
+
 def get_ligand_attributes(
     ligand_mol: Chem.rdchem.Mol,
     metal_coordinating_indices: list[int],
     add_hydrogens: bool = False,
-) -> LigandInfo:
+) -> LigandInfo | list[LigandInfo]:
     """Analyze ligand valence/bonding to determine connector attributes.
 
     Parameters
@@ -384,12 +728,12 @@ def get_ligand_attributes(
 
     Returns
     -------
-    LigandInfo
-        Best ligand candidate with connector and charge metadata.
+    :class:`LigandInfo` or list of :class:`LigandInfo`
+        Returns all sanitized candidate ligands.
 
     Notes
     -----
-    ``L-type connectors`` are neutral donor sites and ``X-type connectors`` are
+    ``l_type_connectors`` are neutral donor sites and ``x_type_connectors`` are
     anionic donor sites relative to the metal center.
 
     """
@@ -404,20 +748,23 @@ def get_ligand_attributes(
     tmp_mol, metal_connected_orig_indices = check_ligand_exception(
         ligand_mol, metal_coordinating_indices
     )
+    ligand_candidates: list[LigandInfo] = []
     if tmp_mol is not None:
         logger.debug("Ligand exception found.")
         total_charge_after, hanging_bonds_after, charged_atoms_after = brd.assess_atoms(
             tmp_mol
         )
-        ligand_best = {
-            "index": 0,
-            "rdmol": tmp_mol,
-            "total_charge": total_charge_after,
-            "hanging_bonds": hanging_bonds_after,
-            "charged_atoms": charged_atoms_after,
-            "L-type connectors": metal_connected_orig_indices,
-            "X-type connectors": [],
-        }
+        ligand_candidates.append(
+            LigandInfo(
+                index=0,
+                rdmol=tmp_mol,
+                total_charge=int(total_charge_after),
+                hanging_bonds=hanging_bonds_after,
+                charged_atoms=charged_atoms_after,
+                l_type_connectors=metal_connected_orig_indices,
+                x_type_connectors=[],
+            )
+        )
     else:
         # Get prospective ligands, each with difference L-type and X-type connections
         dummy_atoms = [
@@ -445,7 +792,7 @@ def get_ligand_attributes(
                     dummy_atoms
                 ]  # All dummy atoms should be deleted for a coordinated ring
             elif len(metal_coordinating_indices) == 5:
-                # Check that all coordinating atoms have exactly 3 bonds (typical for 5-membered aromatic rings)
+                # Check that all coordinating atoms have exactly 4 bonds (typical for 5-membered aromatic rings)
                 if all(
                     ligand_mol.GetAtomWithIdx(idx).GetDegree() == 4
                     for idx in metal_coordinating_indices
@@ -477,13 +824,13 @@ def get_ligand_attributes(
                 total_charge_after, hanging_bonds_after, charged_atoms_after = (
                     brd.assess_atoms(new_ligand)
                 )
-                ligand_prospects[j] = {
-                    "index": j,
-                    "rdmol": new_ligand,
-                    "total_charge": total_charge_after,
-                    "hanging_bonds": hanging_bonds_after,
-                    "charged_atoms": charged_atoms_after,
-                }
+                ligand_prospects[j] = LigandInfo(
+                    index=j,
+                    rdmol=new_ligand,
+                    total_charge=int(total_charge_after),
+                    hanging_bonds=hanging_bonds_after,
+                    charged_atoms=charged_atoms_after,
+                )
                 if len(charged_atoms_after) < 6:
                     logger.debug("___________________________________________________")
                     logger.debug(f"{j}:", total_charge_after, hanging_bonds_after)
@@ -496,39 +843,40 @@ def get_ligand_attributes(
         if not ligand_prospects:
             raise ValueError("Ligand could not be sanitized.")
 
-        # Find the best ligand prospect by sorting with the desired priorities
-        ligand_best = min(
-            reversed(
-                ligand_prospects.values()
-            ),  # All else being equal, choose the greatest number of X-type
-            key=lambda x: (
-                x["hanging_bonds"],
-                abs(x["total_charge"]),
-                len(x["charged_atoms"]),
-            ),
+        for ligand_prospect in ligand_prospects.values():
+            ligand_prospect.l_type_connectors = [
+                metal_connected_atm_indices[x.GetIdx()]
+                for x in dummy_atom_combinations[ligand_prospect.index]
+            ]
+            ligand_prospect.x_type_connectors = [
+                metal_connected_atm_indices[x.GetIdx()]
+                for x in list(
+                    set(dummy_atoms)
+                    - set(dummy_atom_combinations[ligand_prospect.index])
+                )
+            ]
+            ligand_candidates.append(ligand_prospect)
+
+    if not ligand_candidates:
+        raise ValueError("Ligand could not be sanitized.")
+
+    for ligand_candidate in ligand_candidates:
+        ligand_candidate.smiles = mol_to_smiles(ligand_candidate.rdmol)
+        ligand_candidate.chemical_formula = get_molecular_formula(
+            ligand_candidate.rdmol
         )
-        ligand_best["L-type connectors"] = [
-            metal_connected_atm_indices[x.GetIdx()]
-            for x in dummy_atom_combinations[ligand_best["index"]]
-        ]
-        ligand_best["X-type connectors"] = [
-            metal_connected_atm_indices[x.GetIdx()]
-            for x in list(
-                set(dummy_atoms) - set(dummy_atom_combinations[ligand_best["index"]])
-            )
-        ]
+        ligand_candidate.candidate_id = _build_candidate_id(ligand_candidate)
 
-    logger.debug(
-        f"Total ligand charge: {ligand_best['total_charge']}, N_Hanging Bonds {ligand_best['hanging_bonds']}"
+    # Reorder prospects by sorting with the desired priorities.
+    ligand_candidates.sort(
+        key=lambda x: (
+            len(x.charged_atoms or {}),
+            abs(x.total_charge or 0),
+            x.hanging_bonds or 0,
+        )
     )
-    logger.debug("Charged atom info:")
-    for x, y in ligand_best["charged_atoms"].items():
-        logger.debug(f"    {x}: {y}")
 
-    ligand_best["smiles"] = mol_to_smiles(ligand_best["rdmol"])
-    ligand_best["chemical_formula"] = get_molecular_formula(ligand_best["rdmol"])
-
-    return ligand_best
+    return ligand_candidates
 
 
 def assert_same_ring(
@@ -988,15 +1336,154 @@ def prepare_complex(
     return mol
 
 
+def _enumerate_ligand_combinations(
+    ligand_candidate_lists: list[list[LigandInfo]],
+) -> list[dict]:
+    """Build exhaustive ligand assignment enumeration across per-ligand candidates.
+
+    Parameters
+    ----------
+    ligand_candidate_lists : list of list of :class:`LigandInfo`
+        Candidate ligand prospects grouped by ligand position.
+
+    Returns
+    -------
+    list of dict
+        One entry per unique ligand assignment with:
+            - ``ligand_info``: list of :class:`LigandInfo`, one per ligand position.
+            - ``candidate_ids``: ordered per-ligand candidate ids.
+            - ``number_Ltype_connectors``: total L-type connectors across ligands.
+            - ``number_Xtype_connectors``: total X-type connectors across ligands.
+            - ``total_ligand_charge``: total ligand charge.
+    """
+
+    if not ligand_candidate_lists:
+        return []
+
+    combinations_out: list[dict] = []
+    seen_keys: set[tuple[str, ...]] = set()
+    for candidate_tuple in product(*ligand_candidate_lists):
+        ligand_info = list(candidate_tuple)
+        candidate_ids = [x.candidate_id for x in ligand_info]
+        dedup_key = tuple(sorted(candidate_ids))
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
+        combinations_out.append(
+            {
+                "ligand_info": ligand_info,
+                "candidate_ids": candidate_ids,
+                "number_Ltype_connectors": sum(
+                    len(x.l_type_connectors) for x in ligand_info
+                ),
+                "number_Xtype_connectors": sum(
+                    len(x.x_type_connectors) for x in ligand_info
+                ),
+                "total_ligand_charge": sum(int(x.total_charge) for x in ligand_info),
+            }
+        )
+
+    return combinations_out
+
+
+def _score_and_flatten_states(
+    tm_mol: Chem.rdchem.Mol,
+    ligand_combinations: list[dict],
+    target_complex_charge: int = 0,
+    target_electron_count: int = 18,
+) -> list[ComplexState]:
+    """Score ligand assignments against metal-centered chemical plausibility.
+
+    Parameters
+    ----------
+    tm_mol : rdkit.Chem.rdchem.Mol
+        Molecule containing the transition metal center.
+    ligand_combinations : list of dict
+        Candidate ligand assignments from :func:`_enumerate_ligand_combinations`.
+    target_complex_charge : int, default=0
+        Desired total complex charge used for :attr:`ScoreComponents.charge_consistency_penalty`.
+    target_electron_count : int, default=18
+        Target electron count used for :attr:`ScoreComponents.electron_count_penalty`.
+
+    Returns
+    -------
+    list of :class:`ComplexState`
+        One entry per (ligand assignment, oxidation state) pair, sorted by
+        ``score`` ascending (lower is better). The ``complex`` field is absent
+        until :func:`sanitize_complex` assembles the molecule.
+    """
+
+    metal_symbol = tm_mol.GetAtomWithIdx(0).GetSymbol()
+    expected_oxs = set(expected_oxidation_states[metal_symbol])
+
+    scored_states: list[ComplexState] = []
+    for combo in ligand_combinations:
+        n_ltype = int(combo["number_Ltype_connectors"])
+        n_xtype = int(combo["number_Xtype_connectors"])
+        total_ligand_charge = int(combo["total_ligand_charge"])
+        ligand_info = combo["ligand_info"]
+        candidate_ids = combo["candidate_ids"]
+        residual_valence_penalty = sum(int(x.hanging_bonds) for x in ligand_info)
+
+        tm_oxs, tm_chgs, tm_nels = get_tm_attributes(tm_mol, n_ltype, n_xtype)
+        for tm_ox, tm_chg, tm_nel in zip(tm_oxs, tm_chgs, tm_nels):
+            oxidation_penalty = 0 if int(tm_ox) in expected_oxs else 1
+            predicted_complex_charge = int(tm_chg) + total_ligand_charge
+            charge_penalty = abs(predicted_complex_charge - target_complex_charge)
+            electron_penalty = abs(int(tm_nel) - target_electron_count)
+
+            score = (
+                1000 * oxidation_penalty
+                + 100 * charge_penalty
+                + 10 * electron_penalty
+                + residual_valence_penalty
+            )
+            scored_states.append(
+                ComplexState(
+                    score=int(score),
+                    score_components=ScoreComponents(
+                        target_complex_charge=int(target_complex_charge),
+                        target_electron_count=int(target_electron_count),
+                        oxidation_membership_penalty=int(oxidation_penalty),
+                        charge_consistency_penalty=int(charge_penalty),
+                        electron_count_penalty=int(electron_penalty),
+                        residual_valence_penalty=int(residual_valence_penalty),
+                    ),
+                    predicted_complex_charge=int(predicted_complex_charge),
+                    metal=MetalInfo(
+                        symbol=metal_symbol,
+                        oxidation_state=int(tm_ox),
+                        charge=int(tm_chg),
+                        electron_count=int(tm_nel),
+                    ),
+                    ligands=LigandSummary(
+                        ligand_info=ligand_info,
+                        candidate_ids=candidate_ids,
+                        number_Ltype_connectors=n_ltype,
+                        number_Xtype_connectors=n_xtype,
+                        total_charge=total_ligand_charge,
+                    ),
+                )
+            )
+
+    scored_states.sort(key=lambda x: x.score)
+    return scored_states
+
+
 def sanitize_complex(
     mol: Chem.rdchem.Mol,
     value_missing_coord: float = 0,
     add_hydrogens: bool = False,
     add_atom: str = "I",
     sanitize: bool = True,
-) -> dict[str, dict[str, object]]:
-    """Sanitize ligands, determining X-type and L-type, returning a sanitized complex with
-    oxidation state, number of electrons, and metal formal charge.
+    geometry_method: str = "angles",
+    target_charge: int = 0,
+    n_results: int | None = 5,
+    score_cutoff: int | None = 1000,
+    n_per_combination: int | None = None,
+) -> list[ComplexState]:
+    """Sanitize ligands, determining X-type and L-type, returning scored candidate states.
 
     Note that if coordinates are present in a conformer, bonds are detected to find all
     metal interaction points.
@@ -1013,6 +1500,21 @@ def sanitize_complex(
         Element symbol of the "dummy atom" used in :func:`cleave_mol_from_index`
     sanitize : bool, default=True
         If True, the final complex will be sanitized with :func:`sanitize_molecule`
+    geometry_method : str, default="angles"
+        Method passed as ``mode`` to :func:`~tmos.geometry.get_geometry_from_mol`
+        to predict the coordination geometry (e.g. ``"angles"``, ``"posym"``,
+        ``"pymatgen"``, ``"rylm"``).
+    target_charge : int, default=0
+        Desired net charge of the complex, passed to
+        :func:`_score_and_flatten_states` as ``target_complex_charge``.
+    n_results : int or None, default=5
+        Maximum number of states to return. ``None`` returns all.
+    score_cutoff : int or None, default=1000
+        Discard states with score >= this value. ``None`` disables the cutoff.
+        Score >= 1000 indicates an unexpected oxidation state.
+    n_per_combination : int or None, default=None
+        Maximum number of states to retain per unique ligand combination
+        (identified by its sorted ``candidate_ids`` tuple). ``None`` keeps all.
 
     Raises
     ------
@@ -1021,37 +1523,18 @@ def sanitize_complex(
 
     Returns
     -------
-    dict of str to dict of str to object
-        Candidate complexes keyed by a descriptive summary string. Each value
-        contains:
-            - "metal_info": dict with keys:
-                - "rdmol": RDKit molecule of the transition metal center.
-                - "oxidation_state": Oxidation state of the metal center.
-                - "total_charge": Formal charge of the metal center.
-                - "number_electrons": Electron count for the metal center.
-            - "ligand_info": list of dict
-                List of ligand information dictionaries, each with keys:
-                    - "smiles": Canonical explicit hydrogen smiles string generated from the RDKit molecule
-                                of the complex. Note that the dummy atom type is present to denote where the
-                                metal attaches; commonly I.
-                    - "rdmol": RDKit molecule of the ligand.
-                    - "total_charge": Total charge of the ligand.
-                    - "hanging_bonds": Number of unused valencies.
-                    - "charged_atoms": Atom charge information (see :func:`tmos.build_rdmol.assess_atoms`).
-                    - "L-type connectors": List of original atom indices for L-type connectors.
-                    - "X-type connectors": List of original atom indices for X-type connectors.
-            - "complex_info": dict with keys:
-                - "smiles": Canonical explicit hydrogen smiles string generated from the RDKit molecule of the complex
-                - "rdmol": RDKit molecule of the reformed transition metal complex.
-                - "oxidation_state": Oxidation state of the metal center.
-                - "total_charge": Overall charge of the complex.
-                - "geometry": Geometry information of the complex.
+    list of :class:`ComplexState`
+        Candidate states sorted by ``score`` ascending (lower is better). Each
+        entry contains ``score``, ``score_components`` (:class:`ScoreComponents`),
+        ``predicted_complex_charge``, ``metal`` (:class:`MetalInfo`),
+        ``ligands`` (:class:`LigandSummary`), and ``complex``
+        (:class:`ComplexInfo`).
 
     Examples
     --------
     >>> # Typically called after loading a full TMC structure with coordinates.
-    >>> # result = sanitize_complex(mol)
-    >>> # isinstance(result, dict)
+    >>> # results = sanitize_complex(mol)
+    >>> # isinstance(results, list)
     >>> # True
     """
     mol = prepare_complex(
@@ -1065,17 +1548,11 @@ def sanitize_complex(
     frag_mols, coordinating_atoms = cleave_mol_from_index(
         mol, tmc_idx, add_atom=add_atom
     )
-    geometry_angles, n_bonds, _ = get_geometry_from_mol(mol, tmc_idx, mode="angles")
-    try:
-        geometry_rylm, _, _ = get_geometry_from_mol(mol, tmc_idx, mode="rylm")
-    except ImportError:
-        geometry_rylm = "Unavailable (install rylm: pip install git+https://github.com/chrisiacovella/rylm.git)"
-
-    total_xtype = 0
-    total_ltype = 0
-    total_lig_charge = 0
+    geometry_type, n_bonds, _ = get_geometry_from_mol(
+        mol, tmc_idx, mode=geometry_method
+    )
     flag_tm = False
-    lig_info = []
+    ligand_candidate_lists: list[list[LigandInfo]] = []
     for i, f in enumerate(frag_mols):
         m = Chem.Mol(f)
         m.UpdatePropertyCache(strict=False)
@@ -1094,68 +1571,65 @@ def sanitize_complex(
                 for atm in m.GetAtoms()
                 if atm.GetIntProp("__original_index") in coordinating_atoms
             ]
-
-            best_ligand_info = get_ligand_attributes(m, metal_coordinating_indices)
-            #            ### NoteHere
-            #            f2 = best_ligand_info["rdmol"]
-            #            print(f"Fragment {i}: {f2.GetNumAtoms()} atoms")
-            #            missing_orig_idx = sum(1 for a in f2.GetAtoms() if not a.HasProp("__original_index"))
-            #            print(f"  Atoms missing __original_index: {missing_orig_idx}")
-            #            ###
-
-            total_xtype += len(best_ligand_info["X-type connectors"])
-            total_ltype += len(best_ligand_info["L-type connectors"])
-            total_lig_charge += best_ligand_info["total_charge"]
-            lig_info.append(best_ligand_info)
+            all_ligand_candidates = get_ligand_attributes(
+                m,
+                metal_coordinating_indices,
+            )
+            ligand_candidate_lists.append(all_ligand_candidates)
 
     if not flag_tm:
         raise ValueError("No transition metal found")
 
-    tm_oxs, tm_chgs, tm_nels = get_tm_attributes(tm_mol, total_ltype, total_xtype)
+    ligand_combinations = _enumerate_ligand_combinations(ligand_candidate_lists)
+    logger.debug(f"Enumerated {len(ligand_combinations)} ligand combinations")
 
-    # Assemble possible complexes
-    outputs = {}
-    for i, (tm_ox, tm_chg, tm_nel) in enumerate(zip(tm_oxs, tm_chgs, tm_nels)):
+    scored_states = _score_and_flatten_states(
+        tm_mol, ligand_combinations, target_complex_charge=target_charge
+    )
+    logger.debug(
+        f"Scoring complete: {len(scored_states)} (ligand combination, oxidation state) pairs"
+    )
+
+    # Filter: score_cutoff
+    if score_cutoff is not None:
+        scored_states = [s for s in scored_states if s.score < score_cutoff]
+
+    # Filter: n_per_combination
+    if n_per_combination is not None:
+        per_combo_counts: dict[tuple[str, ...], int] = {}
+        filtered: list[ComplexState] = []
+        for state in scored_states:
+            key = tuple(sorted(state.ligands.candidate_ids))
+            count = per_combo_counts.get(key, 0)
+            if count < n_per_combination:
+                filtered.append(state)
+                per_combo_counts[key] = count + 1
+        scored_states = filtered
+
+    # Filter: n_results
+    if n_results is not None:
+        scored_states = scored_states[:n_results]
+
+    # Build rdmols only for retained states
+    for state in scored_states:
         tmp_tm_mol = copy.deepcopy(tm_mol)
         tmc_mol = reform_metal_complex(
             tmp_tm_mol,
-            lig_info,
+            state.ligands.ligand_info,
             coordinating_atoms,
-            tm_charge=tm_chg,
+            tm_charge=state.metal.charge,
             sanitize=sanitize,
         )
-        metal_symbol = tmp_tm_mol.GetAtoms()[0].GetSymbol()
-        charge: int = sum([a.GetFormalCharge() for a in tmc_mol.GetAtoms()])
-        outputs[
-            f"{metal_symbol}; {n_bonds}:{geometry_angles}; OS:{tm_ox}; q:{charge}; Nel:{tm_nel}"
-        ] = {
-            "metal_info": {
-                "chemical_formula": metal_symbol,
-                "rdmol": tmp_tm_mol,
-                "oxidation_state": tm_ox,
-                "total_charge": tm_chg,
-                "number_electrons": tm_nel,
-            },
-            "ligand_info": lig_info,
-            "complex_info": {
-                "number_metal_connections": n_bonds,
-                "smiles": mol_to_smiles(tmc_mol),
-                "chemical_formula": get_molecular_formula(tmc_mol),
-                "rdmol": tmc_mol,
-                "oxidation_state": tm_ox,
-                "total_charge": charge,
-                "geometry_from_angles": geometry_angles,
-                "geometry_from_rylm": geometry_rylm,
-                "number_Ltype_connectors": sum(
-                    [len(x["L-type connectors"]) for x in lig_info]
-                ),
-                "number_Xtype_connectors": sum(
-                    [len(x["X-type connectors"]) for x in lig_info]
-                ),
-            },
-        }
+        state.complex = ComplexInfo(
+            rdmol=tmc_mol,
+            smiles=mol_to_smiles(tmc_mol),
+            formula=get_molecular_formula(tmc_mol),
+            charge=int(sum(a.GetFormalCharge() for a in tmc_mol.GetAtoms())),
+            number_metal_connections=n_bonds,
+            geometry_type=geometry_type,
+        )
 
-    return outputs
+    return scored_states
 
 
 def reform_metal_complex(
@@ -1175,7 +1649,7 @@ def reform_metal_complex(
     ----------
     tm_mol : rdkit.Chem.rdchem.Mol
         RDKit molecule of the transition metal center.
-    lig_info : list[LigandInfo]
+    lig_info : list of :class:`LigandInfo`
         Ligand dictionaries returned by :func:`get_ligand_attributes`.
     coordinating_atoms : list[int]
         List of atom indices (from the original complex) that should be reconnected to the metal center.
@@ -1204,9 +1678,9 @@ def reform_metal_complex(
     tm_symbol = tm_mol.GetAtoms()[0].GetSymbol()
     ltype_atoms, xtype_atoms = [], []
     for lig_dict in lig_info:
-        ltype_atoms.extend(lig_dict["L-type connectors"])
-        xtype_atoms.extend(lig_dict["X-type connectors"])
-        tmp_mol = Chem.RWMol(copy.deepcopy(lig_dict["rdmol"]))
+        ltype_atoms.extend(lig_dict.l_type_connectors)
+        xtype_atoms.extend(lig_dict.x_type_connectors)
+        tmp_mol = Chem.RWMol(copy.deepcopy(lig_dict.rdmol))
         remove_atoms = []
         for atm in tmp_mol.GetAtoms():
             if atm.GetIntProp("__original_index") == -1:
