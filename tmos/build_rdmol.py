@@ -1,9 +1,32 @@
-"""Functions for building RDKit molecules.
+"""Low-level utilities for constructing and interrogating RDKit molecules.
 
-Such functions include:
- - Utilities to import molecules from one package to RDKit
- - Determine the connectivity of the molecule from XYZ coordinates using RDKit or OpenBabel
- - Determining the bond orders of a molecule using RDKit, OpenBabel, or MDAnalysis
+This module provides three groups of functionality that underpin the bond-order
+and charge-assignment pipeline in ``tmos``:
+
+1. **Atom assessment** — valence-balance heuristics that identify atoms with
+   unsatisfied valence or non-zero formal charge, and aggregate them into
+   per-molecule diagnostics.
+2. **Molecule construction** — routines that build RDKit molecules from external
+   representations (QCElemental objects, raw symbols + coordinates) or that
+   copy/synchronise atom and bond properties between two molecules.
+3. **Connectivity and bond-order determination** — a suite of backends
+   (custom covalent-radius heuristic, RDKit, OpenBabel) for inferring bonds from
+   3-D coordinates, plus higher-level wrappers that perceive full bond orders
+   from an already-connected molecule.
+
+Main functions
+--------------
+:func:`xyz_to_rdkit`
+    Convenience wrapper: builds an RDKit molecule directly from element symbols
+    and a NumPy coordinate array, running connectivity detection internally.
+:func:`qcelemental_to_rdkit`
+    Converts a QCElemental-like molecule (with ``symbols``, ``geometry``, and
+    optional ``connectivity``) into an RDKit molecule.
+:func:`determine_bonds`
+    Top-level bond-order perception dispatcher (imported from
+    :mod:`tmos._rdkit_bond_typing`).  Accepts a connectivity-only RDKit
+    molecule and fills in bond orders using the chosen backend
+    (``"openbabel"``, ``"rdkit"``, or ``"hybrid"``).
 
 """
 
@@ -36,10 +59,15 @@ from .graph_mapping import (
 from .reference_values import (
     bond_order_dict,
     bond_type_dict,
-    transition_metal_covalent_radii,
-    METALS_NUM,
+    is_transition_metal,
+    METALS,
 )
 from tmos._rdkit_bond_typing import determine_bonds, molecular_penalty
+
+# Frozenset of atomic numbers treated as metal centers — derived from the METALS registry.
+_METALS_ATOMIC_NUMS: frozenset[int] = frozenset(
+    m.atomic_number for m in METALS.values()
+)
 
 __all__: list[str] = [
     "determine_bonds",
@@ -157,6 +185,12 @@ def assess_atoms(
 ) -> tuple[int | float, int, dict[int, ChargedAtomInfo]]:
     """Assess atom-wise charge state and unsatisfied valence indicators.
 
+    Note: `assess_atoms`` derives charge from valence balance and is therefore
+    unreliable for post-sanitized aromatic systems (e.g. Cp⁻), where RDKit
+    aromaticity satisfies every atom's valence even though the ring carries
+    a formal charge of −1.  For such molecules use
+    ``rdkit.Chem.GetFormalCharge`` instead.
+
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
@@ -243,7 +277,7 @@ def update_formal_charges(mol: Mol) -> None:
     None
     """
     for atm in mol.GetAtoms():
-        if atm.GetAtomicNum() in METALS_NUM:
+        if atm.GetAtomicNum() in _METALS_ATOMIC_NUMS:
             continue
         charge = get_atom_charge(atm)
         if np.finfo(float).eps < abs(charge) < 1 - np.finfo(float).eps:
@@ -572,29 +606,12 @@ def _get_covalent_radius(symbol: str, fallback_radius: float = 1.5) -> float:
         # periodictable stores covalent radius in pm, convert to Angstroms
         if hasattr(element, "covalent_radius") and element.covalent_radius is not None:
             return element.covalent_radius
-        elif _is_transition_metal(symbol):
-            return transition_metal_covalent_radii.get(symbol, fallback_radius)
+        elif symbol in METALS and METALS[symbol].covalent_radius is not None:
+            return METALS[symbol].covalent_radius
         else:
             return fallback_radius
     except AttributeError:
         return fallback_radius
-
-
-def _is_transition_metal(symbol: str) -> bool:
-    """Check whether an element is treated as a transition metal.
-
-    Parameters
-    ----------
-    symbol : str
-        Element symbol.
-
-    Returns
-    -------
-    bool
-        ``True`` when symbol is in transition-metal radius table.
-    """
-
-    return symbol in transition_metal_covalent_radii
 
 
 # Atomic numbers that commonly carry +1 formal charge in organic molecules.
@@ -638,7 +655,7 @@ def _correct_sulfonate_phosphate_interaction(
     """
 
     metal_indices = [
-        a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
+        a.GetIdx() for a in mol.GetAtoms() if is_transition_metal(a.GetSymbol())
     ]
     electronegative_sym: list[str] = ["O", "N", "C"]
     central_sym: list[str] = [
@@ -710,7 +727,7 @@ def _max_valence_for_connectivity(
     int
         Maximum number of bonds the atom may form during connectivity detection.
     """
-    if _is_transition_metal(symbol):
+    if is_transition_metal(symbol):
         return 14  # effectively uncapped for TMs
     vlist = [v for v in pt.GetValenceList(atomic_num) if v != -1]
     base = max(vlist) if vlist else 12
@@ -742,7 +759,7 @@ def _is_valence_satisfied(degree: int, atomic_num: int, symbol: str) -> bool:
     bool
         ``True`` when degree is already a valid closed-shell valence count.
     """
-    if _is_transition_metal(symbol):
+    if is_transition_metal(symbol):
         return False
     vlist = [v for v in pt.GetValenceList(atomic_num) if v != -1]
     return degree in vlist
@@ -762,7 +779,7 @@ def _connectivity_distance_window(
     """
     r_i = _get_covalent_radius(symbol_i)
     r_j = _get_covalent_radius(symbol_j)
-    one_is_tm = _is_transition_metal(symbol_i) or _is_transition_metal(symbol_j)
+    one_is_tm = is_transition_metal(symbol_i) or is_transition_metal(symbol_j)
     factor = 2 if one_is_tm else 1
 
     base = r_i + r_j
@@ -868,7 +885,7 @@ def _determine_connectivity_custom(
     )
     distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
     metal_indices = [
-        a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
+        a.GetIdx() for a in mol.GetAtoms() if is_transition_metal(a.GetSymbol())
     ]
     metal_idx = metal_indices[0] if metal_indices else None
 

@@ -1,7 +1,74 @@
-"""Sanitize and generate oxidation state and other properties for transition metal complexes.
+"""Sanitize transition metal complexes and predict their electronic properties.
 
-This module uses function architectures originally produced in [xyz2mol_tm](https://github.com/jensengroup/xyz2mol_tm/). However rather than using the Huckel method
-an arrow pushing script is produced here with custom checks for ferrocene structures.
+This module is the primary entry point for the ``tmos`` package.  Given an
+RDKit molecule representing a transition metal complex (TMC), it
+
+1. Cleaves every ligand from the metal center.
+2. Redetermines bond orders for each ligand fragment.
+3. Classifies each metal–ligand bond as either an *L-type* (neutral, DATIVE)
+   or *X-type* (anionic, SINGLE) donor using the
+   `Covalent Bond Classification (CBC) <doi.org/10.1016/0022-328X(95)00508-N>`_ method,
+   including full support for haptic (η ≥ 2) ligands.
+4. Scores all (ligand assignment, oxidation state) pairs against chemical
+   plausibility constraints and returns the ranked results.
+
+The implementation follows the architecture of
+`xyz2mol_tm <https://github.com/jensengroup/xyz2mol_tm/>`_, replacing the
+Hückel-based bond assignment with an explicit bond-order perception pipeline
+and adding custom corrections for ferrocene and other haptic motifs.
+
+Main functions
+--------------
+:func:`sanitize_complex`
+    Top-level entry point.  Accepts a 3-D RDKit molecule and returns a ranked
+    list of :class:`ComplexState` objects.
+:func:`get_ligand_attributes`
+    Analyses a single ligand fragment, enumerating all valid L/X-type
+    assignments and detecting haptic groups.
+:func:`is_transition_metal`
+    Get our metal centers of interest
+
+Output of ``sanitize_complex``
+------------------------------
+:func:`sanitize_complex` returns a list of :class:`ComplexState` objects sorted
+by ``score`` ascending (lower is better).  Each :class:`ComplexState` bundles
+four sub-objects:
+
+``state.score`` : int
+    Weighted penalty sum.  Scores below 1000 pass all chemical-plausibility
+    checks (valid oxidation state, consistent complex charge).
+
+``state.metal`` : :class:`MetalInfo`
+    Predicted ``oxidation_state``, formal ``charge``, and d-electron
+    ``electron_count`` for the metal center.
+
+``state.ligands`` : :class:`LigandSummary`
+    Aggregated ligand-field data: total L/X connector counts, net ligand
+    charge, and a per-ligand :class:`LigandInfo` list.  Each
+    :class:`LigandInfo` entry carries the ligand ``smiles``, ``total_charge``,
+    L/X connector indices, and, for haptic ligands, ``haptic_groups``,
+    ``effective_l_count``, and ``effective_x_count``.
+
+``state.complex`` : :class:`ComplexInfo`
+    The fully assembled RDKit molecule (``rdmol``), its canonical ``smiles``,
+    molecular ``formula``, net ``charge``, and predicted coordination
+    ``geometry_type``.
+
+``state.score_components`` : :class:`ScoreComponents`
+    Per-penalty breakdown: oxidation-state membership, charge consistency,
+    electron-count deviation, residual valence, and the
+    negative-charge-with-X-type contradiction flag.
+
+Example
+-------
+Typical usage after loading a structure with 3-D coordinates::
+
+    from tmos import sanitize_complex
+    results = sanitize_complex(mol)
+    best = results[0]
+    print(best.metal.oxidation_state)   # e.g. 2
+    print(best.ligands.summary)
+    print(best.complex.smiles)
 """
 
 import copy
@@ -26,11 +93,14 @@ from .utils import get_molecular_formula, configure_logger, suppress_stdout_stde
 from . import build_rdmol as brd
 from .reference_values import (
     bond_type_dict,
-    METALS_NUM,
-    expected_oxidation_states,
-    group_numbers,
+    METALS,
 )
 from .geometry import get_geometry_from_mol
+
+# Frozenset of atomic numbers treated as metal centers — derived from the METALS registry.
+_METALS_ATOMIC_NUMS: frozenset[int] = frozenset(
+    m.atomic_number for m in METALS.values()
+)
 
 ChargedAtoms: TypeAlias = dict[int, dict[str, object]]
 
@@ -69,6 +139,20 @@ class LigandInfo:
     x_type_connectors : list[int]
         Original-molecule atom indices that bind the metal as anionic (X-type)
         donors.
+    haptic_groups : list[list[int]] or None
+        Groups of two or more coordinating atoms that form a haptic (η ≥ 2)
+        interaction with the metal. Each inner list contains the
+        original-molecule atom indices of one haptic group. Singletons are not
+        included. ``None`` before haptic detection has been run.
+    effective_l_count : int or None
+        Effective L-type donor count for CBC electron counting, accounting for
+        haptic groups.  For each haptic group of hapticity η the contribution
+        is ``η // 2`` L (plus ``η % 2`` X); non-haptic L atoms each contribute
+        1.  ``None`` before haptic detection has been run.
+    effective_x_count : int or None
+        Effective X-type donor count for CBC electron counting, accounting for
+        haptic groups.  Analogous to ``effective_l_count``.  ``None`` before
+        haptic detection has been run.
     """
 
     index: int | None = None
@@ -81,14 +165,29 @@ class LigandInfo:
     charged_atoms: ChargedAtoms | None = None
     l_type_connectors: list[int] | None = None
     x_type_connectors: list[int] | None = None
+    haptic_groups: list[list[int]] | None = None
+    effective_l_count: int | None = None
+    effective_x_count: int | None = None
 
     @property
     def summary(self) -> str:
         smiles_str = self.smiles if self.smiles is not None else "?"
         charge = self.total_charge if self.total_charge is not None else 0
         charge_str = f"+{charge}" if charge > 0 else str(charge)
-        n_l = len(self.l_type_connectors) if self.l_type_connectors is not None else 0
-        n_x = len(self.x_type_connectors) if self.x_type_connectors is not None else 0
+        n_l = (
+            self.effective_l_count
+            if self.effective_l_count is not None
+            else (
+                len(self.l_type_connectors) if self.l_type_connectors is not None else 0
+            )
+        )
+        n_x = (
+            self.effective_x_count
+            if self.effective_x_count is not None
+            else (
+                len(self.x_type_connectors) if self.x_type_connectors is not None else 0
+            )
+        )
         hb = self.hanging_bonds if self.hanging_bonds is not None else 0
         l_list = (
             str(self.l_type_connectors) if self.l_type_connectors is not None else "[]"
@@ -300,9 +399,10 @@ class ComplexState:
         Weighted sum of all penalties in :class:`ScoreComponents`::
 
             1000 * oxidation_membership_penalty
-            + 100 * charge_consistency_penalty
-            +  10 * electron_count_penalty
-            +   1 * residual_valence_penalty
+            + 1000 * negative_charge_with_xtype_penalty
+            +  100 * charge_consistency_penalty
+            +   10 * electron_count_penalty
+            +    1 * residual_valence_penalty
 
     score_components : ScoreComponents
         Decomposed scoring inputs and per-component penalties. See
@@ -637,7 +737,7 @@ def sanitize_ligand(
         List of RDKit atom objects to delete.
     wipe : bool, optional, default=True
         Whether to wipe bond information from the molecule
-    method : str, default="hybrid"
+    method : str, default="openbabel"
         Choose the tool used to determine bond borders.
 
         - rdkit: ``rdDetermineBonds.DetermineBondOrders``
@@ -710,6 +810,9 @@ def _build_candidate_id(candidate: LigandInfo) -> str:
         "l_type_connectors": sorted(l_connectors),
         "x_type_connectors": sorted(x_connectors),
         "charged_atoms": _normalize_charged_atoms(candidate.charged_atoms),
+        "haptic_groups": sorted([sorted(g) for g in candidate.haptic_groups])
+        if candidate.haptic_groups is not None
+        else [],
     }
     digest = hashlib.sha1(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -721,7 +824,7 @@ def get_ligand_attributes(
     ligand_mol: Chem.rdchem.Mol,
     metal_coordinating_indices: list[int],
     add_hydrogens: bool = False,
-) -> LigandInfo | list[LigandInfo]:
+) -> list[LigandInfo]:
     """Analyze ligand valence/bonding to determine connector attributes.
 
     Parameters
@@ -737,7 +840,7 @@ def get_ligand_attributes(
 
     Returns
     -------
-    :class:`LigandInfo` or list of :class:`LigandInfo`
+    list of :class:`LigandInfo`
         Returns all sanitized candidate ligands.
 
     Notes
@@ -760,9 +863,9 @@ def get_ligand_attributes(
     ligand_candidates: list[LigandInfo] = []
     if tmp_mol is not None:
         logger.debug("Ligand exception found.")
-        total_charge_after, hanging_bonds_after, charged_atoms_after = brd.assess_atoms(
-            tmp_mol
-        )
+        _, hanging_bonds_after, charged_atoms_after = brd.assess_atoms(tmp_mol)
+        total_charge_after = Chem.GetFormalCharge(tmp_mol)
+        # Exception ligands are single-atom or small known motifs; no haptic groups.
         ligand_candidates.append(
             LigandInfo(
                 index=0,
@@ -772,6 +875,9 @@ def get_ligand_attributes(
                 charged_atoms=charged_atoms_after,
                 l_type_connectors=metal_connected_orig_indices,
                 x_type_connectors=[],
+                haptic_groups=[],
+                effective_l_count=len(metal_connected_orig_indices),
+                effective_x_count=0,
             )
         )
     else:
@@ -793,46 +899,73 @@ def get_ligand_attributes(
         }
         logger.debug(f"There are {len(dummy_atoms)} dummy atoms")
 
-        # Assumes carbon rings
+        # Detect haptic groups: connected components of coordinating atoms bonded to each other.
+        haptic_groups = _find_haptic_groups(ligand_mol, metal_coordinating_indices)
+        # _find_haptic_groups works on ligand-fragment indices. Convert each group
+        # to original-complex indices (stored as __original_index on each atom) so
+        # that haptic_coord_indices and the effective-count loop use the same index
+        # space as metal_connected_atm_indices and l_type_connectors.
+        haptic_groups = [
+            [
+                ligand_mol.GetAtomWithIdx(idx).GetIntProp("__original_index")
+                for idx in group
+            ]
+            for group in haptic_groups
+        ]
+        haptic_coord_indices: set[int] = set()
+        for group in haptic_groups:
+            if len(group) >= 2:
+                haptic_coord_indices.update(group)
+        haptic_dummy_atoms = [
+            atm
+            for atm in dummy_atoms
+            if metal_connected_atm_indices.get(atm.GetIdx()) in haptic_coord_indices
+        ]
+        non_haptic_dummy_atoms = [
+            atm for atm in dummy_atoms if atm not in haptic_dummy_atoms
+        ]
+
+        # For haptic groups, determine which dummy atoms to delete based on ring/degree
+        # heuristics.
+        # All haptic atoms are classified as L-type (DATIVE bonds when reformed).
+        haptic_delete: list[Chem.rdchem.Atom] = []
+        for group in haptic_groups:
+            if len(group) < 2:
+                continue
+            eta = len(group)
+            group_dummy = [
+                atm
+                for atm in haptic_dummy_atoms
+                if metal_connected_atm_indices.get(atm.GetIdx()) in group
+            ]
+            # Delete all dummy atoms for every haptic group regardless of η.
+            # All haptic atoms are L-type; effective_l_count/effective_x_count
+            # carry the CBC contribution (η//2 L, η%2 X), so all C–M bonds
+            # should be DATIVE when reformed.
+            haptic_delete.extend(group_dummy)
+
+        # Non-haptic dummy atoms are enumerated as before (combinations for L/X classification)
         dummy_atom_combinations = []
-        if is_coordinate_ring(ligand_mol, metal_coordinating_indices):
-            if len(metal_coordinating_indices) == 6:
-                dummy_atom_combinations = [
-                    dummy_atoms
-                ]  # All dummy atoms should be deleted for a coordinated ring
-            elif len(metal_coordinating_indices) == 5:
-                # Check that all coordinating atoms have exactly 4 bonds (typical for 5-membered aromatic rings)
-                if all(
-                    ligand_mol.GetAtomWithIdx(idx).GetDegree() == 4
-                    for idx in metal_coordinating_indices
-                ):
-                    dummy_atom_combinations = [dummy_atoms[1:]]
-                elif (
-                    sum(
-                        ligand_mol.GetAtomWithIdx(idx).GetDegree() == 4
-                        for idx in metal_coordinating_indices
-                    )
-                    == 4
-                ):
-                    dummy_atom_combinations = [
-                        dummy_atoms
-                    ]  # All dummy atoms should be deleted for a coordinated ring where one atom isn't saturated
-                else:
-                    dummy_atom_combinations = []
-                    for k in range(len(dummy_atoms), -1, -1):
-                        dummy_atom_combinations.extend([*combinations(dummy_atoms, k)])
-        else:
-            dummy_atom_combinations = []
-            for k in range(len(dummy_atoms), -1, -1):
-                dummy_atom_combinations.extend([*combinations(dummy_atoms, k)])
+        for k in range(len(non_haptic_dummy_atoms), -1, -1):
+            dummy_atom_combinations.extend([*combinations(non_haptic_dummy_atoms, k)])
+        # Prepend the haptic dummy atoms to each combination so they are always deleted
+        dummy_atom_combinations = [
+            haptic_delete + list(combo) for combo in dummy_atom_combinations
+        ]
 
         ligand_prospects = {}
         for j, delete_list in enumerate(dummy_atom_combinations):
             new_ligand = sanitize_ligand(ligand_mol, delete_list=delete_list)
             if new_ligand is not None:
-                total_charge_after, hanging_bonds_after, charged_atoms_after = (
-                    brd.assess_atoms(new_ligand)
+                _, hanging_bonds_after, charged_atoms_after = brd.assess_atoms(
+                    new_ligand
                 )
+                # sanitize_ligand calls Chem.SanitizeMol, so RDKit has already
+                # assigned authoritative formal charges (including on aromatic
+                # anions such as Cp⁻ where valence-balance gives 0 but the
+                # formal charge is -1). Use GetFormalCharge as the canonical
+                # source; assess_atoms is kept only for hanging_bonds / charged_atoms.
+                total_charge_after = Chem.GetFormalCharge(new_ligand)
                 ligand_prospects[j] = LigandInfo(
                     index=j,
                     rdmol=new_ligand,
@@ -864,6 +997,33 @@ def get_ligand_attributes(
                     - set(dummy_atom_combinations[ligand_prospect.index])
                 )
             ]
+
+            # Compute effective L/X counts for CBC electron counting.
+            # Haptic groups contribute η//2 L and η%2 X regardless of their
+            # position in l_type_connectors (all haptic atoms are L-type).
+            l_set = set(ligand_prospect.l_type_connectors)
+            x_set = set(ligand_prospect.x_type_connectors)
+            eff_l = 0
+            eff_x = 0
+            assigned_haptic: set[int] = set()
+            for group in haptic_groups:
+                if len(group) < 2:
+                    continue
+                # Only count this group if at least one member was assigned as L
+                if any(orig_idx in l_set for orig_idx in group):
+                    eta = len(group)
+                    eff_l += eta // 2
+                    eff_x += eta % 2
+                    assigned_haptic.update(group)
+            # Non-haptic contributors
+            eff_l += sum(1 for idx in l_set if idx not in assigned_haptic)
+            eff_x += sum(1 for idx in x_set if idx not in assigned_haptic)
+            ligand_prospect.haptic_groups = [
+                group for group in haptic_groups if len(group) >= 2
+            ]
+            ligand_prospect.effective_l_count = eff_l
+            ligand_prospect.effective_x_count = eff_x
+
             ligand_candidates.append(ligand_prospect)
 
     if not ligand_candidates:
@@ -923,6 +1083,58 @@ def assert_same_ring(
         return False
     else:
         return ind2 in indices
+
+
+def _find_haptic_groups(
+    mol: Chem.rdchem.Mol,
+    coordinating_indices: list[int],
+) -> list[list[int]]:
+    """Identify groups of mutually-bonded coordinating atoms (haptic interactions).
+
+    Builds a subgraph from *coordinating_indices* using bonds already present
+    in *mol*, then returns its connected components.  Components of size ≥ 2
+    represent haptic (η ≥ 2) groups; singletons represent ordinary σ-donors.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        Ligand fragment molecule (post-cleavage from the metal center).
+    coordinating_indices : list of int
+        Atom indices in *mol* that were bonded to the metal.
+
+    Returns
+    -------
+    list of list of int
+        One inner list per connected component.  Each element is an atom index
+        from *coordinating_indices*.  Components are returned in ascending order
+        of their smallest member.
+    """
+    coord_set = set(coordinating_indices)
+    # Union-Find
+    parent = {i: i for i in coordinating_indices}
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a: int, b: int) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for bond in mol.GetBonds():
+        i1, i2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        if i1 in coord_set and i2 in coord_set:
+            _union(i1, i2)
+
+    groups: dict[int, list[int]] = {}
+    for idx in coordinating_indices:
+        root = _find(idx)
+        groups.setdefault(root, []).append(idx)
+
+    return sorted([sorted(g) for g in groups.values()])
 
 
 def detect_additional_bonds(
@@ -1024,7 +1236,7 @@ def correct_ferrocene(mol: Chem.rdchem.Mol, index: int) -> tuple[Chem.rdchem.Mol
     new_index = index
     for a in mol.GetAtoms():
         a.SetIntProp("__original_index", a.GetIdx())
-        if a.GetAtomicNum() in METALS_NUM:
+        if a.GetAtomicNum() in _METALS_ATOMIC_NUMS:
             new_index = a.GetIdx()
 
     return mol, new_index
@@ -1154,7 +1366,7 @@ def find_metal_index(mol: Chem.rdchem.Mol) -> int:
     tmc_idx = None
     for a in mol.GetAtoms():
         a.SetNoImplicit(True)
-        if a.GetAtomicNum() in METALS_NUM:
+        if a.GetAtomicNum() in _METALS_ATOMIC_NUMS:
             if tmc_idx is not None:
                 raise ValueError(
                     "More than one metal detected! Multi-metal structures are not yet supported."
@@ -1198,12 +1410,12 @@ def get_tm_attributes(
     """
 
     atom = tm_mol.GetAtomWithIdx(0)
-    n_group: int = group_numbers[atom.GetSymbol()]
+    n_group: int = METALS[atom.GetSymbol()].group
     charge = n_group + n_xtype + 2 * n_ltype - n_electrons
     oxidation_state = n_xtype + charge
 
     # Shift values based on realistic oxidation states
-    oxidation_states: list[int] = expected_oxidation_states[atom.GetSymbol()]
+    oxidation_states: list[int] = METALS[atom.GetSymbol()].expected_oxidation_states
     offsets = np.array(oxidation_states) - oxidation_state
     charges = charge + offsets
     electron_counts = n_electrons - offsets
@@ -1248,7 +1460,7 @@ def cleave_mol_from_index(
     params.splitHydrides = True  # This should ensure hydrides are split
 
     # Metals of interest SMARTS, including all transition metals and main group metals
-    metal_smarts = ",".join(f"#{atomic_num}" for atomic_num in METALS_NUM)
+    metal_smarts = ",".join(f"#{m.atomic_number}" for m in METALS.values())
     MetalsOfInterest = (
         f"[{metal_smarts}]" "~[#1,#5,#6,#14,#15,#33,#51,#16,#34,#52,#17,#35,#53,#85]"
     )
@@ -1270,7 +1482,7 @@ def cleave_mol_from_index(
     ind_metal: int = [
         ii
         for ii, f in enumerate(frag_mols)
-        if sum([a.GetAtomicNum() in METALS_NUM for a in f.GetAtoms()])
+        if sum([a.GetAtomicNum() in _METALS_ATOMIC_NUMS for a in f.GetAtoms()])
     ][0]
     if add_atom is not None:
         pos_metal = frag_mols[ind_metal].GetConformer().GetAtomPosition(0)
@@ -1383,11 +1595,19 @@ def _enumerate_ligand_combinations(
             {
                 "ligand_info": ligand_info,
                 "candidate_ids": candidate_ids,
+                # Use effective counts when available (haptic-aware CBC electron counting);
+                # fall back to raw connector-list lengths for non-haptic ligands.
                 "number_Ltype_connectors": sum(
-                    len(x.l_type_connectors) for x in ligand_info
+                    x.effective_l_count
+                    if x.effective_l_count is not None
+                    else len(x.l_type_connectors)
+                    for x in ligand_info
                 ),
                 "number_Xtype_connectors": sum(
-                    len(x.x_type_connectors) for x in ligand_info
+                    x.effective_x_count
+                    if x.effective_x_count is not None
+                    else len(x.x_type_connectors)
+                    for x in ligand_info
                 ),
                 "total_ligand_charge": sum(int(x.total_charge) for x in ligand_info),
             }
@@ -1424,7 +1644,7 @@ def _score_and_flatten_states(
     """
 
     metal_symbol = tm_mol.GetAtomWithIdx(0).GetSymbol()
-    expected_oxs = set(expected_oxidation_states[metal_symbol])
+    expected_oxs = set(METALS[metal_symbol].expected_oxidation_states)
 
     scored_states: list[ComplexState] = []
     for combo in ligand_combinations:
@@ -1574,7 +1794,7 @@ def sanitize_complex(
         m.UpdatePropertyCache(strict=False)
         atoms = m.GetAtoms()
         for atom in atoms:  # Check that metal is found
-            if atom.GetAtomicNum() in METALS_NUM:
+            if atom.GetAtomicNum() in _METALS_ATOMIC_NUMS:
                 if len(atoms) > 1:
                     raise ValueError("Not all ligands were separated.")
                 flag_tm = True
@@ -1688,7 +1908,8 @@ def reform_metal_complex(
     -----
         - The function assumes that the transition metal atom is the first atom in `tm_mol`.
         - Atom indices in `coordinating_atoms` refer to the original ligand atoms before combination.
-        - The function does not sanitize the resulting molecule, as this may break certain structures.
+        - When ``sanitize=True`` (the default), the resulting molecule is sanitized via
+          :func:`sanitize_molecule`.
     """
 
     tm_symbol = tm_mol.GetAtoms()[0].GetSymbol()
@@ -1724,6 +1945,9 @@ def reform_metal_complex(
                 f" and {bond.GetEndAtom().GetSymbol()}: {bond.GetEndAtomIdx()}"
             )
         atm = tmc_mol.GetAtoms()[i]
+        # L-type atoms (including all haptic/η-coordinated atoms, which are
+        # deliberately classified as L-type) receive DATIVE bonds — the
+        # standard bond type for η-coordinated ligands in RDKit.
         if atm.GetIntProp("__original_index") in ltype_atoms:
             bond_type = bond_type_dict[0]
         elif atm.GetIntProp("__original_index") in xtype_atoms:
