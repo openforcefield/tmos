@@ -531,8 +531,8 @@ def test_fe_haptic_complex_expected_state_summary():
     assert best.complex is not None
     assert best.complex.formula == "C24Fe1H16O4"
     assert best.complex.charge == 0
-    assert best.complex.geometry_type == "Capped Octahedral"
-    assert best.complex.number_metal_connections == 7
+    assert best.complex.geometry_type == "Trigonal Bipyramidal"
+    assert best.complex.number_metal_connections == 5
 
     assert best.score_components is not None
     assert best.score_components.oxidation_membership_penalty == 0

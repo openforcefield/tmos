@@ -95,7 +95,7 @@ from .reference_values import (
     bond_type_dict,
     METALS,
 )
-from .geometry import get_geometry_from_mol
+from .geometry import get_geometry_from_mol, get_geometry_from_positions
 
 # Frozenset of atomic numbers treated as metal centers — derived from the METALS registry.
 _METALS_ATOMIC_NUMS: frozenset[int] = frozenset(
@@ -359,12 +359,17 @@ class ComplexInfo:
         Net formal charge of the assembled complex (sum of all atom formal
         charges).
     number_metal_connections : int
-        Number of bonds to the metal center as determined by
-        :func:`~tmos.geometry.get_geometry_from_mol`.
+        Effective coordination number using CBC-aligned haptic counting: each
+        haptic group of η_n atoms contributes η//2 centroids (one per adjacent
+        atom pair in bond-graph order) plus 1 for an odd η (the X-type donor
+        position).  Non-haptic σ-bonds contribute 1 each.
     geometry_type : str
-        Geometry label predicted by :func:`~tmos.geometry.get_geometry_from_mol`
-        using the method selected by the ``geometry_method`` argument of
-        :func:`sanitize_complex`.
+        Geometry label predicted from CBC-corrected coordination vectors.
+        For haptic ligands, each η_n group is replaced by η//2 pair centroids
+        (+ 1 for odd η) before geometry classification, so that an η4-diene
+        contributes 2 sites and an η6-arene contributes 3 sites, matching the
+        CBC L-count and giving chemically meaningful labels (e.g.
+        Fe(CO)₃(η4-diene) → "Square Pyramidal", CpMn(CO)₃ → "Octahedral").
     """
 
     rdmol: object | None = None
@@ -1087,6 +1092,81 @@ def assert_same_ring(
         return False
     else:
         return ind2 in indices
+
+
+def _haptic_group_to_cbc_positions(
+    mol: Chem.rdchem.Mol,
+    group: list[int],
+    conf: "Chem.Conformer",
+) -> list[np.ndarray]:
+    """Return η//2 centroid positions for a haptic group, CBC-aligned.
+
+    Atoms are ordered by bond-graph traversal (DFS from a chain endpoint, or
+    from the lowest-index atom for a ring), then paired consecutively.  Each
+    adjacent pair contributes one centroid, matching the η//2 L-type count
+    used in CBC electron counting.  If η is odd (η3, η5), the unpaired atom
+    (the X-type donor site) contributes its own position.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.rdchem.Mol
+        The parent molecule containing bond connectivity.
+    group : list of int
+        Atom indices of the haptic group (in the parent molecule).
+    conf : rdkit.Chem.Conformer
+        Conformer supplying 3D coordinates.
+
+    Returns
+    -------
+    list of numpy.ndarray
+        Between 1 and η//2 + η%2 position vectors in Å.
+
+    Examples
+    --------
+    η4 diene [a,b,c,d] bonded a-b-c-d → centroids [(a+b)/2, (c+d)/2]
+    η3 allyl [a,b,c] bonded a-b-c    → centroids [(a+b)/2], plus c position
+    η6 benzene [a..f] ring           → centroids of 3 adjacent pairs
+    """
+    if len(group) == 1:
+        return [np.array(conf.GetAtomPosition(group[0]))]
+
+    # Build local adjacency within the group.
+    group_set = set(group)
+    adj: dict[int, list[int]] = {idx: [] for idx in group}
+    for idx in group:
+        for nb in mol.GetAtomWithIdx(idx).GetNeighbors():
+            if nb.GetIdx() in group_set:
+                adj[idx].append(nb.GetIdx())
+
+    # Start DFS from a degree-1 node (chain endpoint) or lowest-index node (ring).
+    start = next((idx for idx in sorted(group) if len(adj[idx]) == 1), group[0])
+
+    # DFS to get bond-graph order.
+    visited: list[int] = []
+    seen: set[int] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        visited.append(node)
+        for nb in adj[node]:
+            if nb not in seen:
+                stack.append(nb)
+
+    # Pair consecutive atoms; leftover (odd η) contributes its own position.
+    positions: list[np.ndarray] = []
+    i = 0
+    while i + 1 < len(visited):
+        pos_a = np.array(conf.GetAtomPosition(visited[i]))
+        pos_b = np.array(conf.GetAtomPosition(visited[i + 1]))
+        positions.append((pos_a + pos_b) / 2.0)
+        i += 2
+    if i < len(visited):
+        positions.append(np.array(conf.GetAtomPosition(visited[i])))
+
+    return positions
 
 
 def _find_haptic_groups(
@@ -1861,6 +1941,13 @@ def sanitize_complex(
         scored_states = scored_states[:n_results]
 
     # Build rdmols only for retained states
+    # Haptic-corrected geometry requires 3D coordinates; pre-fetch if available.
+    _has_conformer = mol.GetNumConformers() > 0
+    if _has_conformer:
+        conf = mol.GetConformer()
+        metal_pos = np.array(conf.GetAtomPosition(tmc_idx))
+        metal_atom_ref = mol.GetAtomWithIdx(tmc_idx)
+
     for state in scored_states:
         tmp_tm_mol = copy.deepcopy(tm_mol)
         tmc_mol = reform_metal_complex(
@@ -1870,13 +1957,42 @@ def sanitize_complex(
             tm_charge=state.metal.charge,
             sanitize=sanitize,
         )
+
+        if _has_conformer:
+            # Haptic-corrected geometry: replace each haptic group with its centroid.
+            # Non-haptic coordinating atoms contribute their actual position.
+            all_haptic_groups: list[list[int]] = [
+                g
+                for lig in state.ligands.ligand_info
+                for g in (lig.haptic_groups or [])
+            ]
+            haptic_flat: set[int] = {idx for g in all_haptic_groups for idx in g}
+            eff_positions: list[np.ndarray] = []
+            for neighbor in metal_atom_ref.GetNeighbors():
+                if neighbor.GetIdx() not in haptic_flat:
+                    eff_positions.append(
+                        np.array(conf.GetAtomPosition(neighbor.GetIdx()))
+                    )
+            for group in all_haptic_groups:
+                for pos in _haptic_group_to_cbc_positions(mol, group, conf):
+                    eff_positions.append(pos)
+
+            if eff_positions:
+                haptic_geom, haptic_n = get_geometry_from_positions(
+                    metal_pos, eff_positions, tol=0.5
+                )
+            else:
+                haptic_geom, haptic_n = geometry_type, n_bonds
+        else:
+            haptic_geom, haptic_n = geometry_type, n_bonds
+
         state.complex = ComplexInfo(
             rdmol=tmc_mol,
             smiles=mol_to_smiles(tmc_mol),
             formula=get_molecular_formula(tmc_mol),
             charge=int(sum(a.GetFormalCharge() for a in tmc_mol.GetAtoms())),
-            number_metal_connections=n_bonds,
-            geometry_type=geometry_type,
+            number_metal_connections=haptic_n,
+            geometry_type=haptic_geom,
         )
 
     return scored_states

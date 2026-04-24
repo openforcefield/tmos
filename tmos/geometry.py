@@ -843,6 +843,80 @@ def isolate_geometry_atoms(
     return rdmol
 
 
+def get_geometry_from_positions(
+    metal_pos: np.ndarray,
+    neighbor_positions: np.ndarray | list,
+    tol: float = 0.5,
+) -> GeometryResult:
+    """Determine coordination geometry from raw Cartesian positions.
+
+    Constructs a minimal RDKit molecule from the supplied coordinates and
+    delegates to :func:`get_geometry_from_angles`, which uses both pairwise
+    angle comparison and orientation-tensor eigenvalue similarity against ideal
+    templates.  Atom identity is irrelevant — only positions matter.
+
+    This is the entry point used by :func:`~tmos.tmos.sanitize_complex` when
+    haptic ligands are present: the atoms belonging to each haptic group are
+    replaced by a single centroid before calling this function, so that an η_n
+    group contributes one coordination direction rather than n separate bonds.
+
+    Parameters
+    ----------
+    metal_pos : array-like of shape (3,)
+        Cartesian position of the metal atom in Å.
+    neighbor_positions : array-like of shape (n, 3)
+        Cartesian positions of the effective coordination sites (real atoms
+        or virtual haptic centroids).
+    tol : float, default 0.5
+        Tolerance forwarded to :func:`get_geometry_from_angles`.
+
+    Returns
+    -------
+    GeometryResult
+        ``(geometry_label, n_neighbors)`` tuple.
+
+    Examples
+    --------
+    >>> # Trigonal planar example (120 degree angles)
+    >>> import numpy as np
+    >>> metal = np.array([0.0, 0.0, 0.0])
+    >>> import math
+    >>> neighbors = np.array([
+    ...     [math.cos(math.radians(0)),   math.sin(math.radians(0)),   0],
+    ...     [math.cos(math.radians(120)), math.sin(math.radians(120)), 0],
+    ...     [math.cos(math.radians(240)), math.sin(math.radians(240)), 0],
+    ... ])
+    >>> label, n = get_geometry_from_positions(metal, neighbors)
+    >>> label
+    'Trigonal Planar'
+    """
+    metal_pos = np.asarray(metal_pos, dtype=float)
+    neighbors = np.asarray(neighbor_positions, dtype=float)
+    if neighbors.ndim == 1:
+        neighbors = neighbors.reshape(1, 3)
+    n = len(neighbors)
+    if n == 0:
+        return "Element", 0
+    if n == 1:
+        return "Monocoordinate", 1
+
+    # Build a minimal all-carbon rdmol (element does not affect geometry scoring)
+    emol = Chem.EditableMol(Chem.Mol())
+    emol.AddAtom(Chem.Atom(6))  # metal placeholder at index 0
+    for i in range(n):
+        emol.AddAtom(Chem.Atom(6))
+        emol.AddBond(0, i + 1, Chem.BondType.SINGLE)
+    rdmol = emol.GetMol()
+
+    conf = Chem.Conformer(n + 1)
+    conf.SetAtomPosition(0, Point3D(*metal_pos))
+    for i, pos in enumerate(neighbors):
+        conf.SetAtomPosition(i + 1, Point3D(*pos))
+    rdmol.AddConformer(conf, assignId=True)
+
+    return get_geometry_from_angles(rdmol, central_idx=0, tol=tol), n
+
+
 def get_geometry_from_mol(
     rdmol: Chem.rdchem.Mol,
     central_idx: int,
