@@ -3,10 +3,10 @@
 Tests cover:
 - _find_haptic_groups: unit tests for the connectivity-detection helper.
 - get_ligand_attributes: haptic_groups, effective_l_count, effective_x_count
-  fields are populated correctly for η2–η6 ligands.
+    fields are populated correctly for η2–η6 ligands.
 - sanitize_complex: end-to-end oxidation-state scoring for Zeise's salt (η2),
-  a representative η3 allyl complex, an η6 arene complex, and the CCD
-  benzene-without-H edge case.
+    a representative η3 allyl complex, an η6 arene complex, and the CCD
+    benzene-without-H edge case.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from rdkit import Chem
 from rdkit.Geometry import Point3D
 
 from tmos import tmos as tmos_module
-from tmos.tmos import _find_haptic_groups
+from tmos.tmos import LigandInfo, _find_haptic_groups
 
 
 # ---------------------------------------------------------------------------
@@ -503,3 +503,366 @@ def test_reformed_complex_haptic_bonds_are_dative():
         assert (
             b.GetBondType() == Chem.BondType.DATIVE
         ), f"Expected DATIVE for Cr–C haptic bond, got {b.GetBondTypeAsDouble()}"
+
+
+def test_fe_haptic_complex_expected_state_summary():
+    """Regression test for provided Fe haptic complex scoring and assignment."""
+    mol = _fe_haptic_complex_mol()
+    results = tmos_module.sanitize_complex(
+        mol, target_charge=0, score_cutoff=None, n_results=5
+    )
+    assert len(results) > 0, "No states returned for provided Fe haptic complex"
+
+    best = results[0]
+    assert best.score == 3
+
+    assert best.metal is not None
+    assert best.metal.symbol == "Fe"
+    assert best.metal.oxidation_state == 0
+    assert best.metal.charge == 0
+    assert best.metal.electron_count == 18
+
+    assert best.ligands is not None
+    assert len(best.ligands.ligand_info) == 4
+    assert best.ligands.number_Ltype_connectors == 5
+    assert best.ligands.number_Xtype_connectors == 0
+    assert best.ligands.total_charge == 0
+
+    assert best.complex is not None
+    assert best.complex.formula == "C24Fe1H16O4"
+    assert best.complex.charge == 0
+    assert best.complex.geometry_type == "Capped Octahedral"
+    assert best.complex.number_metal_connections == 7
+
+    assert best.score_components is not None
+    assert best.score_components.oxidation_membership_penalty == 0
+    assert best.score_components.negative_charge_with_xtype_penalty == 0
+    assert best.score_components.charge_consistency_penalty == 0
+    assert best.score_components.electron_count_penalty == 0
+    assert best.score_components.residual_valence_penalty == 3
+
+
+# ---------------------------------------------------------------------------
+# Builder for anionic η3-allyl complex
+# ---------------------------------------------------------------------------
+
+
+def _cr_co4_allyl_mol(cr_allyl_dist=2.1, cr_co_dist=1.85, cc_dist=1.40):
+    """Return geometry for [Cr(CO)₄(η3-allyl)]⁻.
+
+    The η3-allyl sits above Cr (+y direction); four CO ligands fill the
+    remaining coordination sites along −y, −x, +x, +z.  All Cr–C(allyl)
+    distances are ≤ 2.53 Å, within the custom connectivity threshold for
+    transition-metal pairs (base 2.16 Å + 2 × 0.20 Å tolerance ≈ 2.67 Å).
+    """
+    origin = np.array([0.1, 0.1, 0.1])
+    # η3-allyl: C1-C2-C3 in a shallow arc above Cr
+    c1 = origin + np.array([-cc_dist, cr_allyl_dist, 0.0])
+    c2 = origin + np.array([0.0, cr_allyl_dist * 0.9, 0.0])
+    c3 = origin + np.array([cc_dist, cr_allyl_dist, 0.0])
+    h1 = c1 + np.array([-0.5, 0.5, 0.5])
+    h3 = c3 + np.array([0.5, 0.5, 0.5])
+    h2a = c2 + np.array([0.0, 0.5, 0.5])
+    h2b = c2 + np.array([0.0, 0.5, -0.5])
+    # 4 CO ligands (Cr–C ≈ 1.85 Å, C–O ≈ 1.15 Å)
+    co1_c = origin + np.array([0.0, -cr_co_dist, 0.0])
+    co1_o = origin + np.array([0.0, -(cr_co_dist + 1.15), 0.0])
+    co2_c = origin + np.array([-cr_co_dist, 0.0, 0.0])
+    co2_o = origin + np.array([-(cr_co_dist + 1.15), 0.0, 0.0])
+    co3_c = origin + np.array([cr_co_dist, 0.0, 0.0])
+    co3_o = origin + np.array([cr_co_dist + 1.15, 0.0, 0.0])
+    co4_c = origin + np.array([0.0, 0.0, cr_co_dist])
+    co4_o = origin + np.array([0.0, 0.0, cr_co_dist + 1.15])
+
+    symbols = [
+        "Cr",
+        "C",
+        "C",
+        "C",
+        "H",
+        "H",
+        "H",
+        "H",  # allyl + H
+        "C",
+        "O",
+        "C",
+        "O",
+        "C",
+        "O",
+        "C",
+        "O",  # 4 CO
+    ]
+    positions = [
+        origin.tolist(),
+        c1.tolist(),
+        c2.tolist(),
+        c3.tolist(),
+        h1.tolist(),
+        h3.tolist(),
+        h2a.tolist(),
+        h2b.tolist(),
+        co1_c.tolist(),
+        co1_o.tolist(),
+        co2_c.tolist(),
+        co2_o.tolist(),
+        co3_c.tolist(),
+        co3_o.tolist(),
+        co4_c.tolist(),
+        co4_o.tolist(),
+    ]
+    return _mol_from_symbols_positions(symbols, positions)
+
+
+def _fe_haptic_complex_mol():
+    """Return the provided Fe haptic-complex geometry as an RDKit mol."""
+    symbols = [
+        "Fe",
+        "C",
+        "O",
+        "C",
+        "O",
+        "C",
+        "O",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "O",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "C",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+        "H",
+    ]
+    positions = [
+        [1.42744563, 1.76994327, 4.18351898],
+        [-0.23246823, 1.89425041, 4.76866406],
+        [-1.28864229, 1.92768361, 5.21395634],
+        [1.90687878, 2.66643802, 5.62812272],
+        [2.18321123, 3.19494913, 6.60784366],
+        [1.81872122, 0.0660151, 4.61762634],
+        [2.02512649, -1.0253736, 4.88562677],
+        [3.75636955, 0.80126597, 2.36040862],
+        [3.46178351, 2.04989495, 3.01426014],
+        [2.47546031, 2.98729894, 2.60780034],
+        [1.19063302, 2.59677071, 2.19762747],
+        [0.81773348, 1.20771061, 2.17130835],
+        [1.5310376, 0.17736905, 1.30311261],
+        [2.97211646, -0.03294371, 1.59904421],
+        [3.77360711, -1.16216909, 1.28859565],
+        [5.00564007, -0.93025215, 1.8748484],
+        [4.98503543, 0.25900195, 2.52871533],
+        [3.31670231, -2.35117747, 0.56907232],
+        [2.69919934, -2.23508091, -0.67239296],
+        [2.24451222, -3.36033851, -1.33599958],
+        [2.39178495, -4.61233786, -0.76401004],
+        [2.99859431, -4.73558139, 0.47571349],
+        [3.45797026, -3.61434494, 1.1397527],
+        [6.24386652, -1.68293379, 1.8704795],
+        [7.19875881, -1.44251208, 2.86159222],
+        [8.38572551, -2.1474111, 2.87669522],
+        [8.64275629, -3.10116136, 1.90514669],
+        [7.70730268, -3.33659637, 0.91004249],
+        [6.51909329, -2.63334362, 0.88520882],
+        [4.33881784, 2.46892087, 3.50090118],
+        [2.69067928, 4.04519831, 2.72231351],
+        [0.46339499, 3.36604649, 1.95344145],
+        [-0.25723442, 1.07733678, 2.02472238],
+        [1.40984797, 0.50346289, 0.26100438],
+        [1.0176989, -0.78479846, 1.39312762],
+        [2.59516307, -1.26016082, -1.12593972],
+        [1.77376451, -3.25931246, -2.30321269],
+        [2.03473064, -5.49003197, -1.28221366],
+        [3.11217506, -5.71029839, 0.92707567],
+        [3.92977083, -3.70668821, 2.10699264],
+        [6.99318812, -0.70198818, 3.61977837],
+        [9.11409513, -1.95470146, 3.65088683],
+        [9.56979379, -3.65483259, 1.92000364],
+        [7.90831997, -4.07074408, 0.14356593],
+        [5.80453846, -2.80864251, 0.09627161],
+    ]
+    return _mol_from_symbols_positions(symbols, positions)
+
+
+# ---------------------------------------------------------------------------
+# Tests for negative_xtype_penalty with haptic X contributions
+# ---------------------------------------------------------------------------
+
+
+class TestNegativeXtypePenaltyHapticGroups:
+    """The negative_charge_with_xtype_penalty must not fire for haptic-X contributors.
+
+    η3-allyl contributes effective_x_count=1 via η%2 == 1.  Before the fix
+    this caused anionic allyl complexes to be incorrectly filtered out
+    (score ≥ score_cutoff=1000).  The fix tracks σ-X (non-haptic) connectors
+    separately and only applies the penalty to those.
+
+    [Cr(CO)₄(η3-allyl)]⁻ is used as the test case:
+    - allyl η3 → haptic_x=1, sigma_x=0, total_charge=0 (neutral radical)
+    - target_charge=−1 → metal_charge=−1, Cr(0) oxidation state
+    - Cr(0) is valid for Cr; 18e; score should be 0 (with fix) vs 1000 (without)
+    """
+
+    @pytest.fixture(scope="class")
+    def cr_allyl_results(self):
+        mol = _cr_co4_allyl_mol()
+        return tmos_module.sanitize_complex(
+            mol, target_charge=-1, score_cutoff=1000, n_results=5
+        )
+
+    def test_anionic_allyl_not_filtered(self, cr_allyl_results):
+        """sanitize_complex returns at least one state for [Cr(CO)₄(η3-allyl)]⁻."""
+        assert len(cr_allyl_results) > 0, (
+            "No states survived score_cutoff=1000 for [Cr(CO)₄(η3-allyl)]⁻. "
+            "The negative_xtype_penalty may be incorrectly firing for the haptic X "
+            "from η3-allyl (η%2 == 1 is a CBC bookkeeping artifact, not a σ-donor)."
+        )
+
+    def test_anionic_allyl_charge_consistent(self, cr_allyl_results):
+        """Best state for [Cr(CO)₄(η3-allyl)]⁻ has predicted_complex_charge == -1."""
+        assert len(cr_allyl_results) > 0
+        assert cr_allyl_results[0].predicted_complex_charge == -1
+
+    def test_anionic_allyl_no_xtype_penalty(self, cr_allyl_results):
+        """Best state has negative_charge_with_xtype_penalty == 0 (haptic X excluded)."""
+        assert len(cr_allyl_results) > 0
+        assert (
+            cr_allyl_results[0].score_components.negative_charge_with_xtype_penalty == 0
+        )
+
+
+class TestNegativeXtypePenaltyUnit:
+    """Unit-level verification of the sigma-X-only penalty rule via _score_and_flatten_states.
+
+    The integration test above uses a geometry-derived complex where full η3 perception
+    depends on the connectivity algorithm.  This class bypasses geometry by constructing
+    combo dicts directly, letting us verify the exact code path in
+    ``_score_and_flatten_states`` that distinguishes haptic X from sigma X.
+    """
+
+    @staticmethod
+    def _make_cr_mol():
+        """Minimal single-atom Cr RDKit mol for score-only tests."""
+        mol = Chem.RWMol()
+        atom = Chem.Atom("Cr")
+        atom.SetNoImplicit(True)
+        mol.AddAtom(atom)
+        return mol.GetMol()
+
+    def test_haptic_x_no_penalty_for_negative_metal(self):
+        """x_type_connectors=[] with effective_x_count=1 (η3-allyl CBC η%2): penalty must be 0.
+
+        Scenario: [Cr(CO)₄(η3-allyl)]⁻, n_L=5, n_X=1 (haptic remainder),
+        sigma_X=0, total_ligand_charge=0, target=-1.
+        CBC: charge=-1, n_X=1, n_L=5 → nel=18, Cr(0).
+        Haptic atoms are always L-type; x_type_connectors is empty for the allyl,
+        so n_sigma_xtype=0 and the penalty does not fire.
+        """
+        cr_mol = self._make_cr_mol()
+        # η3-allyl: all 3 carbons are L-type (DATIVE), none in x_type_connectors.
+        # effective_x_count=1 is the CBC η%2 bookkeeping remainder, not a σ-bond.
+        allyl_lig = LigandInfo(
+            index=0,
+            rdmol=None,
+            smiles=None,
+            chemical_formula=None,
+            candidate_id="test-allyl",
+            total_charge=0,
+            hanging_bonds=0,
+            charged_atoms={},
+            l_type_connectors=[1, 2, 3, 4, 5],  # η3-allyl (as 1 L) + 4 CO
+            x_type_connectors=[],  # no sigma-X donors
+            haptic_groups=[[1, 2, 3]],
+            effective_l_count=5,
+            effective_x_count=1,
+        )
+        combo = {
+            "ligand_info": [allyl_lig],
+            "candidate_ids": ["test-allyl"],
+            "number_Ltype_connectors": 5,
+            "number_Xtype_connectors": 1,
+            "total_ligand_charge": 0,
+        }
+        results = tmos_module._score_and_flatten_states(
+            cr_mol, [combo], target_complex_charge=-1
+        )
+        # Cr(0): oxidation_state = n_X + charge = 1 + (-1) = 0; nel = 6+1+10+1=18
+        cr0 = next((s for s in results if s.metal.oxidation_state == 0), None)
+        assert (
+            cr0 is not None
+        ), "Cr(0) state must exist for [Cr(CO)₄(η3-allyl)]⁻ scenario"
+        assert cr0.score_components.negative_charge_with_xtype_penalty == 0, (
+            "Haptic-only X (n_sigma_xtype=0) must not trigger negative_xtype_penalty "
+            "even when metal_charge < 0"
+        )
+        assert cr0.predicted_complex_charge == -1
+        assert cr0.metal.electron_count == 18
+
+    def test_sigma_x_still_penalizes_negative_metal(self):
+        """x_type_connectors=[idx] with effective_x_count=1 (genuine σ-X): penalty must be 1.
+
+        Scenario: hypothetical Cr(-1) with one sigma X donor (e.g. Cl).
+        Cl is not haptic, so it appears in x_type_connectors; n_sigma_xtype=1
+        and the penalty must still fire.
+        """
+        cr_mol = self._make_cr_mol()
+        # Genuine σ-X donor (e.g. Cl): appears in x_type_connectors.
+        sigma_lig = LigandInfo(
+            index=0,
+            rdmol=None,
+            smiles=None,
+            chemical_formula=None,
+            candidate_id="test-sigma",
+            total_charge=0,
+            hanging_bonds=0,
+            charged_atoms={},
+            l_type_connectors=[1, 2, 3, 4, 5],  # 5 L (e.g. CO ligands)
+            x_type_connectors=[10],  # one genuine sigma-X donor
+            haptic_groups=[],
+            effective_l_count=5,
+            effective_x_count=1,
+        )
+        combo = {
+            "ligand_info": [sigma_lig],
+            "candidate_ids": ["test-sigma"],
+            "number_Ltype_connectors": 5,
+            "number_Xtype_connectors": 1,
+            "total_ligand_charge": 0,
+        }
+        results = tmos_module._score_and_flatten_states(
+            cr_mol, [combo], target_complex_charge=-1
+        )
+        cr0 = next((s for s in results if s.metal.oxidation_state == 0), None)
+        assert cr0 is not None
+        assert cr0.score_components.negative_charge_with_xtype_penalty == 1, (
+            "A genuine sigma X donor (n_sigma_xtype=1) with metal_charge < 0 "
+            "must still trigger the penalty"
+        )

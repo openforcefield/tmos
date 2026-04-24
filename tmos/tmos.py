@@ -234,12 +234,16 @@ class ScoreComponents:
         Sum of ``hanging_bonds`` across all ligand candidates in this
         assignment. Weighted ×1 in the total score.
     negative_charge_with_xtype_penalty : int
-        1 if ``metal_charge < 0`` and ``n_xtype > 0``, 0 otherwise.
-        X-type bonds are covalent σ-donors; each X bond withdraws an electron
-        from the ligand side toward the metal. Having both X-type donors *and*
-        a negative metal formal charge is physically contradictory — the X
-        assignment would have to be reversed to reach a negative oxidation
-        state. Weighted ×1000 in the total score.
+        1 if ``metal_charge < 0`` and the number of *σ-type* X donors
+        (non-haptic X-type connectors) is > 0, 0 otherwise.
+        Genuine covalent σ-X bonds (e.g. Cl, H, alkyl) withdraw one electron
+        from the ligand toward the metal, making a negative metal formal charge
+        physically contradictory.  X contributions from odd-η haptic groups
+        (η%2 == 1 bookkeeping remainders, e.g. η3-allyl, η5-Cp) are excluded
+        because they arise from CBC π-electron pairing and do not carry
+        directional electron-withdrawal character — anionic allyl complexes
+        such as [Fe(CO)₃(η3-allyl)]⁻ are valid at Fe(0).
+        Weighted ×1000 in the total score.
     """
 
     target_complex_charge: int
@@ -1574,7 +1578,8 @@ def _enumerate_ligand_combinations(
             - ``ligand_info``: list of :class:`LigandInfo`, one per ligand position.
             - ``candidate_ids``: ordered per-ligand candidate ids.
             - ``number_Ltype_connectors``: total L-type connectors across ligands.
-            - ``number_Xtype_connectors``: total X-type connectors across ligands.
+            - ``number_Xtype_connectors``: total X-type connectors across ligands
+              (includes haptic η%2 contributions; used for CBC electron counting).
             - ``total_ligand_charge``: total ligand charge.
     """
 
@@ -1655,17 +1660,26 @@ def _score_and_flatten_states(
         candidate_ids = combo["candidate_ids"]
         residual_valence_penalty = sum(int(x.hanging_bonds) for x in ligand_info)
 
+        # Sigma-X count: only genuine covalent σ-donors. Haptic atoms are always
+        # placed in l_type_connectors (DATIVE bonds), so x_type_connectors contains
+        # only non-haptic donors. The η%2 == 1 bookkeeping X from odd-η haptic groups
+        # never appears in x_type_connectors, so this count is naturally sigma-only.
+        n_sigma_xtype = sum(len(x.x_type_connectors or []) for x in ligand_info)
         tm_oxs, tm_chgs, tm_nels = get_tm_attributes(tm_mol, n_ltype, n_xtype)
         for tm_ox, tm_chg, tm_nel in zip(tm_oxs, tm_chgs, tm_nels):
             oxidation_penalty = 0 if int(tm_ox) in expected_oxs else 1
             predicted_complex_charge = int(tm_chg) + total_ligand_charge
             charge_penalty = abs(predicted_complex_charge - target_complex_charge)
             electron_penalty = abs(int(tm_nel) - target_electron_count)
-            # X-type bonds withdraw electron density from ligands toward the metal;
-            # a negative metal formal charge alongside X-type donors is physically
-            # contradictory. Only L-type (π-acceptor) ligand fields can stabilize
-            # negative oxidation states (e.g. CO in carbonylate anions).
-            negative_xtype_penalty = 1 if int(tm_chg) < 0 and n_xtype > 0 else 0
+            # Genuine covalent σ-X bonds (Cl, H, alkyl, …) withdraw one electron
+            # from the ligand toward the metal; a negative metal formal charge
+            # alongside such donors is physically contradictory.
+            # Haptic-group X contributions (η%2 == 1, e.g. η3-allyl, η5-Cp) are a
+            # CBC bookkeeping remainder from pairing π-electrons and do NOT carry
+            # this directional constraint — anionic allyl complexes like
+            # [Fe(CO)₃(η3-allyl)]⁻ are real and valid at Fe(0).
+            # Therefore only σ-X donors (n_sigma_xtype) trigger this penalty.
+            negative_xtype_penalty = 1 if int(tm_chg) < 0 and n_sigma_xtype > 0 else 0
 
             score = (
                 1000 * oxidation_penalty
