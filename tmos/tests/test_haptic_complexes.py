@@ -446,16 +446,14 @@ def test_benzene_haptic_fields(builder_kwargs, target_charge, expected_os, descr
     best = results[0]
     all_lig_info = best.ligands.ligand_info
 
-    # Find the benzene ligand (6 C atoms in one haptic group)
+    assert best.ligands.haptic_group_counts == {
+        6: 1
+    }, f"Expected one η6 group, got {best.ligands.haptic_group_counts} in {description}"
     benzene_lig = next(
-        (
-            li
-            for li in all_lig_info
-            if li.haptic_groups and any(len(g) == 6 for g in li.haptic_groups)
-        ),
-        None,
+        li
+        for li in all_lig_info
+        if li.haptic_groups and any(len(g) == 6 for g in li.haptic_groups)
     )
-    assert benzene_lig is not None, f"η6 group not detected in {description}"
     assert benzene_lig.effective_l_count == 3
     assert benzene_lig.effective_x_count == 0
 
@@ -469,15 +467,14 @@ def test_benzene_without_H_haptic_fields():
     assert len(results) > 0, "No states for H-less benzene complex"
     best = results[0]
     all_lig_info = best.ligands.ligand_info
+    assert best.ligands.haptic_group_counts == {
+        6: 1
+    }, f"Expected one η6 group, got {best.ligands.haptic_group_counts}"
     benzene_lig = next(
-        (
-            li
-            for li in all_lig_info
-            if li.haptic_groups and any(len(g) == 6 for g in li.haptic_groups)
-        ),
-        None,
+        li
+        for li in all_lig_info
+        if li.haptic_groups and any(len(g) == 6 for g in li.haptic_groups)
     )
-    assert benzene_lig is not None, "η6 group not detected for H-less benzene"
     assert benzene_lig.effective_l_count == 3
 
 
@@ -527,6 +524,7 @@ def test_fe_haptic_complex_expected_state_summary():
     assert best.ligands.number_Ltype_connectors == 5
     assert best.ligands.number_Xtype_connectors == 0
     assert best.ligands.total_charge == 0
+    assert best.ligands.haptic_group_counts == {4: 1}
 
     assert best.complex is not None
     assert best.complex.formula == "C24Fe1H16O4"
@@ -540,6 +538,35 @@ def test_fe_haptic_complex_expected_state_summary():
     assert best.score_components.charge_consistency_penalty == 0
     assert best.score_components.electron_count_penalty == 0
     assert best.score_components.residual_valence_penalty == 3
+
+
+def test_fe_charge0_complex_has_two_haptic_bonds():
+    """Provided neutral Fe geometry should contain one η4 haptic interaction.
+
+    The four-membered carbocyclic ring (atoms 11-12-24-16) coordinates as η4,
+    contributing two CBC L-type bonds (η4//2 = 2L) — the same two-haptic-bond
+    count the test name refers to.  Combined with 3 CO ligands this gives
+    Fe(CO)3(η4-ring): Fe(0), 18e, Trigonal Bipyramidal — consistent with the
+    18-electron rule.
+    """
+    mol = _fe_charge0_two_haptic_mol()
+    results = tmos_module.sanitize_complex(
+        mol, target_charge=0, score_cutoff=None, n_results=5
+    )
+    assert len(results) > 0, "No states returned for provided neutral Fe geometry"
+
+    best = results[0]
+    assert best.predicted_complex_charge == 0
+    assert best.ligands.haptic_group_counts == {4: 1}, (
+        f"Expected one η4 haptic group (four-membered ring, 2 L-type CBC bonds), "
+        f"got {best.ligands.haptic_group_counts}"
+    )
+    assert (
+        best.metal.electron_count == 18
+    ), f"Fe(CO)3(η4-ring) should satisfy the 18e rule, got {best.metal.electron_count}e"
+    assert (
+        best.complex.number_metal_connections == 5
+    ), f"3 CO + η4(2L) = 5 effective connections, got {best.complex.number_metal_connections}"
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +735,129 @@ def _fe_haptic_complex_mol():
         [9.56979379, -3.65483259, 1.92000364],
         [7.90831997, -4.07074408, 0.14356593],
         [5.80453846, -2.80864251, 0.09627161],
+    ]
+    return _mol_from_symbols_positions(symbols, positions)
+
+
+def _fe_charge0_two_haptic_mol():
+    """Return the provided Fe geometry expected to have one η2 interaction."""
+    symbols = [
+        "Fe",
+        "O",
+        "O",
+        "C",
+        "H",
+        "C",
+        "C",
+        "H",
+        "H",
+        "C",
+        "O",
+        "C",
+        "C",
+        "C",
+        "H",
+        "H",
+        "C",
+        "C",
+        "H",
+        "H",
+        "C",
+        "H",
+        "C",
+        "H",
+        "C",
+        "C",
+        "H",
+        "H",
+        "C",
+        "H",
+        "C",
+        "H",
+        "C",
+        "H",
+        "C",
+        "H",
+        "H",
+        "C",
+        "H",
+        "H",
+        "C",
+        "H",
+        "C",
+        "H",
+        "C",
+        "H",
+        "H",
+        "C",
+        "H",
+        "H",
+        "C",
+        "C",
+        "H",
+        "H",
+        "C",
+        "H",
+        "H",
+    ]
+    positions = [
+        [11.76748918, 7.15277021, 2.13016044],
+        [9.56931533, 9.06487914, 2.27648657],
+        [12.57804175, 7.75697118, -0.6051279],
+        [8.7184299, 4.70504729, 0.23163294],
+        [8.05615261, 5.09445745, -0.5515537],
+        [10.39532348, 8.26730679, 2.21954498],
+        [9.03076546, 3.4901625, 2.88011221],
+        [9.70384556, 3.13855238, 3.66557458],
+        [8.01195003, 3.24237816, 3.1895362],
+        [12.23947566, 7.47844912, 0.45700713],
+        [13.55595855, 9.23184087, 3.11275827],
+        [10.58258985, 5.38061037, 2.75813093],
+        [11.65885941, 5.73778456, 3.6743194],
+        [13.10062831, 6.4618303, 5.58514059],
+        [13.05436574, 6.58814456, 6.67034171],
+        [13.03509031, 7.45409184, 5.13487273],
+        [11.52474725, 4.99535562, 1.76355054],
+        [10.75758278, 2.77316666, 1.06595304],
+        [10.82942485, 2.07095257, 0.23115642],
+        [11.43634215, 2.42109564, 1.846281],
+        [14.45929894, 5.82944735, 5.26025663],
+        [15.21997804, 6.46254918, 5.73371339],
+        [13.45162698, 3.57938405, 5.20141101],
+        [13.47777456, 2.56913592, 5.63153229],
+        [12.63472059, 5.33883484, 2.65395102],
+        [14.830379, 5.73642216, 3.77535686],
+        [14.77193658, 6.72481067, 3.31481848],
+        [15.87208095, 5.40830985, 3.72244106],
+        [9.13645761, 5.02464402, 2.76588093],
+        [8.65029386, 5.47476716, 3.63929307],
+        [9.31216233, 2.72759591, 1.57874556],
+        [9.08416607, 1.67226583, 1.77898432],
+        [11.22463985, 4.15639854, 0.569477],
+        [12.13528991, 4.02472637, -0.02650234],
+        [13.79014623, 3.43086744, 3.71330141],
+        [13.0172177, 2.83929835, 3.21745262],
+        [14.72518214, 2.86795982, 3.64619693],
+        [8.42545771, 5.51951136, 1.49704876],
+        [7.3470368, 5.4732001, 1.67179249],
+        [8.68987537, 6.56562703, 1.32727157],
+        [11.88176837, 5.63984648, 5.14610858],
+        [10.99728867, 6.01937534, 5.67293201],
+        [13.9768765, 4.76014389, 2.95481623],
+        [14.49859598, 4.54808827, 2.01318811],
+        [10.14758495, 4.80423214, -0.31434266],
+        [10.40537462, 5.85392174, -0.47511624],
+        [10.16017114, 4.30562938, -1.28737172],
+        [12.06687606, 4.15538222, 5.5202559],
+        [11.91200748, 4.05558696, 6.59807576],
+        [11.29726406, 3.56009103, 5.02373948],
+        [12.89231518, 8.34595899, 2.79947488],
+        [14.51799255, 4.43508508, 5.87525933],
+        [15.50582325, 3.99514982, 5.72283504],
+        [14.33516446, 4.48725659, 6.95065868],
+        [8.37947921, 3.2406945, 0.48784613],
+        [7.33888616, 3.14270746, 0.80415077],
+        [8.50983198, 2.65654696, -0.42551142],
     ]
     return _mol_from_symbols_positions(symbols, positions)
 

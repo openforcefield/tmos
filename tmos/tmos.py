@@ -40,7 +40,7 @@ four sub-objects:
 
 ``state.metal`` : :class:`MetalInfo`
     Predicted ``oxidation_state``, formal ``charge``, and d-electron
-    ``electron_count`` for the metal center.
+    ``electron_count`` for the metal center, ``symbol``.
 
 ``state.ligands`` : :class:`LigandSummary`
     Aggregated ligand-field data: total L/X connector counts, net ligand
@@ -77,6 +77,7 @@ import json
 from dataclasses import dataclass
 from itertools import combinations, product
 from typing import TypeAlias
+from collections import Counter
 from collections.abc import Sequence
 
 from loguru import logger
@@ -124,7 +125,7 @@ class LigandInfo:
         Molecular formula string.
     candidate_id : str
         Content-addressed hash identifier built from SMILES, charge, connector
-        lists, and charged-atom information. See :func:`_build_candidate_id`.
+        lists, haptic groups, and charged-atom information. See :func:`_build_candidate_id`.
     total_charge : int
         Net formal charge of the ligand as isolated from the metal.
     hanging_bonds : int
@@ -196,14 +197,18 @@ class LigandInfo:
             str(self.x_type_connectors) if self.x_type_connectors is not None else "[]"
         )
         n_charged = len(self.charged_atoms) if self.charged_atoms is not None else 0
-        return "\n".join(
-            [
-                f"{smiles_str}\ncharge={charge_str}, {n_l}L/{n_x}X connectors, {hb} hanging bond(s)",
-                f"  L-type: {l_list}",
-                f"  X-type: {x_list}",
-                f"  Charged atoms: {n_charged} atom(s)",
-            ]
-        )
+        haptic_parts = [
+            f"η{len(g)} {g}" for g in (self.haptic_groups or []) if len(g) >= 2
+        ]
+        lines = [
+            f"{smiles_str}\ncharge={charge_str}, {n_l}L/{n_x}X connectors, {hb} hanging bond(s)",
+            f"  L-type: {l_list}",
+            f"  X-type: {x_list}",
+            f"  Charged atoms: {n_charged} atom(s)",
+        ]
+        if haptic_parts:
+            lines.append(f"  Haptic: {', '.join(haptic_parts)}")
+        return "\n".join(lines)
 
 
 @dataclass
@@ -322,11 +327,18 @@ class LigandSummary:
         Ordered ``candidate_id`` values matching ``ligand_info``; used for
         deduplication keying.
     number_Ltype_connectors : int
-        Total count of neutral (L-type) donor sites across all ligands.
+        Effective L-type donor count across all ligands (CBC-aware: uses
+        ``effective_l_count`` per ligand, so haptic η_n groups contribute η//2).
     number_Xtype_connectors : int
-        Total count of anionic (X-type) donor sites across all ligands.
+        Effective X-type donor count across all ligands (CBC-aware: uses
+        ``effective_x_count`` per ligand, so odd-η haptic groups contribute η%2).
     total_charge : int
         Sum of ``total_charge`` from every :class:`LigandInfo` entry.
+    haptic_group_counts : dict[int, int]
+        Mapping of hapticity η to the number of haptic groups with that η,
+        aggregated across all ligands.  For example, ``{4: 1, 6: 1}`` means
+        one η4 group and one η6 group.  Empty dict when no haptic groups are
+        present.
     """
 
     ligand_info: list[LigandInfo]
@@ -334,13 +346,33 @@ class LigandSummary:
     number_Ltype_connectors: int
     number_Xtype_connectors: int
     total_charge: int
+    haptic_group_counts: dict[int, int] = None
+
+    def __post_init__(self):
+        if self.haptic_group_counts is None:
+            self.haptic_group_counts = dict(
+                Counter(
+                    len(g)
+                    for li in self.ligand_info
+                    for g in (li.haptic_groups or [])
+                    if len(g) >= 2
+                )
+            )
 
     @property
     def summary(self) -> str:
         charge_str = (
             f"+{self.total_charge}" if self.total_charge > 0 else str(self.total_charge)
         )
-        return f"{len(self.ligand_info)} ligand(s), {self.number_Ltype_connectors}L/{self.number_Xtype_connectors}X donors, total charge={charge_str}"
+        haptic_str = (
+            ", haptic: "
+            + ", ".join(
+                f"{v}×η{k}" for k, v in sorted(self.haptic_group_counts.items())
+            )
+            if self.haptic_group_counts
+            else ""
+        )
+        return f"{len(self.ligand_info)} ligand(s), {self.number_Ltype_connectors}L/{self.number_Xtype_connectors}X donors, total charge={charge_str}{haptic_str}"
 
 
 @dataclass

@@ -657,7 +657,7 @@ def _correct_sulfonate_phosphate_interaction(
     metal_indices = [
         a.GetIdx() for a in mol.GetAtoms() if is_transition_metal(a.GetSymbol())
     ]
-    electronegative_sym: list[str] = ["O", "N", "C"]
+    electronegative_sym: list[str] = ["O", "N"]
     central_sym: list[str] = [
         "S",
         "P",
