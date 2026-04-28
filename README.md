@@ -36,8 +36,10 @@ print(best.complex.smiles)          # canonical SMILES of the reassembled comple
 `sanitize_complex` returns a list of `ComplexState` objects sorted by score
 ascending (lower is better). Scores below 1000 indicate a chemically
 plausible state (valid oxidation state, consistent net charge).
+The total score is a weighted sum of penalty terms available via
+`state.score_components`.
 
-Each `ComplexState` has four sub-objects:
+Each `ComplexState` has five sub-objects:
 
 | Attribute | Type | Key fields |
 |---|---|---|
@@ -45,6 +47,7 @@ Each `ComplexState` has four sub-objects:
 | `state.metal` | `MetalInfo` | `oxidation_state`, `electron_count`, `charge` |
 | `state.ligands` | `LigandSummary` | `number_Ltype_connectors`, `number_Xtype_connectors`, `total_charge`, `ligand_info` |
 | `state.complex` | `ComplexInfo` | `rdmol`, `smiles`, `formula`, `geometry_type` |
+| `state.score_components` | `ScoreComponents` | Penalty breakdown |
 
 ### Organic / non-metal molecule (from XYZ data)
 

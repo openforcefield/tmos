@@ -506,6 +506,8 @@ class ComplexState:
             + 1000 * negative_charge_with_xtype_penalty
             +  100 * charge_consistency_penalty
             +   10 * electron_count_penalty
+            +   10 * oxidation_state_preference_penalty
+            +   20 * geometry_oxidation_preference_penalty
             +    1 * residual_valence_penalty
 
     score_components : ScoreComponents
