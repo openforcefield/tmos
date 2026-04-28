@@ -511,7 +511,7 @@ def test_fe_haptic_complex_expected_state_summary():
     assert len(results) > 0, "No states returned for provided Fe haptic complex"
 
     best = results[0]
-    assert best.score == 3
+    assert best.score == 33
 
     assert best.metal is not None
     assert best.metal.symbol == "Fe"
@@ -538,6 +538,7 @@ def test_fe_haptic_complex_expected_state_summary():
     assert best.score_components.charge_consistency_penalty == 0
     assert best.score_components.electron_count_penalty == 0
     assert best.score_components.residual_valence_penalty == 3
+    assert best.score_components.oxidation_state_preference_penalty == 3
 
 
 def test_fe_charge0_complex_has_two_haptic_bonds():

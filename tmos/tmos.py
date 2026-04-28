@@ -74,9 +74,10 @@ Typical usage after loading a structure with 3-D coordinates::
 import copy
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from itertools import combinations, product
-from typing import TypeAlias
+from typing import Any, TypeAlias
 from collections import Counter
 from collections.abc import Sequence
 
@@ -249,6 +250,19 @@ class ScoreComponents:
         directional electron-withdrawal character — anionic allyl complexes
         such as [Fe(CO)₃(η3-allyl)]⁻ are valid at Fe(0).
         Weighted ×1000 in the total score.
+    oxidation_state_preference_penalty : int
+        Per-oxidation-state preference weight drawn from
+        ``MetalDefinition.oxidation_state_penalties`` for the predicted OS.
+        A weight of 0 means no penalty; higher values deprioritise uncommon
+        but chemically valid OS values (e.g. Cu(0), Fe(0)) relative to
+        more common ones.  Weighted ×10 in the total score, matching the
+        electron-count penalty multiplier so it acts as a tiebreaker.
+    geometry_oxidation_preference_penalty : int
+        Optional per-geometry oxidation-state preference weight drawn from
+        ``MetalDefinition.geometry_properties[geometry]["oxidation_state_penalties"]``.
+        This is applied only when a geometry-specific mapping exists for the
+        predicted complex geometry. Weighted ×20 in the total score to give
+        geometry-derived oxidation hints stronger ranking influence.
     """
 
     target_complex_charge: int
@@ -258,6 +272,8 @@ class ScoreComponents:
     electron_count_penalty: int
     residual_valence_penalty: int
     negative_charge_with_xtype_penalty: int
+    oxidation_state_preference_penalty: int = 0
+    geometry_oxidation_preference_penalty: int = 0
 
     @property
     def summary(self) -> str:
@@ -268,9 +284,56 @@ class ScoreComponents:
                 f"  neg. charge + X-type: {self.negative_charge_with_xtype_penalty} × 1000 = {1000 * self.negative_charge_with_xtype_penalty}",
                 f"  charge consistency:   {self.charge_consistency_penalty} × 100 = {100 * self.charge_consistency_penalty}",
                 f"  electron count:       {self.electron_count_penalty} × 10 = {10 * self.electron_count_penalty}",
+                f"  OS preference:        {self.oxidation_state_preference_penalty} × 10 = {10 * self.oxidation_state_preference_penalty}",
+                f"  geom OS preference:   {self.geometry_oxidation_preference_penalty} × 20 = {20 * self.geometry_oxidation_preference_penalty}",
                 f"  residual valence:     {self.residual_valence_penalty} × 1 = {self.residual_valence_penalty}",
             ]
         )
+
+
+def _normalize_geometry_key(geometry_name: str) -> str:
+    """Canonicalize geometry labels for dictionary lookups.
+
+    Examples
+    --------
+    "Square Planar" -> "square_planar"
+    "square-planar" -> "square_planar"
+    "Capped Trigonal Prismatic (distorted)" -> "capped_trigonal_prismatic"
+    """
+    key = geometry_name.strip().lower()
+    # Drop parenthetical descriptors so canonical names can be matched.
+    key = re.sub(r"\s*\([^)]*\)", "", key)
+    key = key.replace("-", " ").replace("/", " ")
+    key = re.sub(r"\s+", "_", key)
+    return key
+
+
+def _get_geometry_os_preference_weight(
+    metal_symbol: str,
+    geometry_type: str | None,
+    oxidation_state: int,
+) -> int:
+    """Return optional geometry-specific OS preference weight for one state."""
+    if geometry_type is None:
+        return 0
+
+    geometry_props = METALS[metal_symbol].geometry_properties
+    if not geometry_props:
+        return 0
+
+    target_key = _normalize_geometry_key(geometry_type)
+    matched_props: dict[str, Any] | None = None
+    for key, props in geometry_props.items():
+        if _normalize_geometry_key(key) == target_key:
+            matched_props = props
+            break
+    if matched_props is None:
+        return 0
+
+    os_weights = matched_props.get("oxidation_state_penalties", {})
+    if not isinstance(os_weights, dict):
+        return 0
+    return int(os_weights.get(int(oxidation_state), 0))
 
 
 @dataclass
@@ -685,9 +748,7 @@ def check_ligand_exception(
     formula: str = get_molecular_formula(mol)
     smiles: str | None = {  # Exceptions
         "C1O1": "[C-]#[O+]",
-        "H1N3": "[H][N]=[N+]=[N-]",
-        "O1": "[O]([H])[H]",  # Instances of oxo tend to be unphysical
-        "H1O2": "[O]([H])[H]",  # Instances of peroxide tend to be unphysical
+        # "H1N3": "[H][N]=[N+]=[N-]", # shouldn't be neutral
         "C1N1S1": "[N]#[C][S-]",
     }.get(formula, None)
 
@@ -695,34 +756,8 @@ def check_ligand_exception(
         return None, metal_connected_orig_indices
 
     tmp_mol = Chem.MolFromSmiles(smiles, sanitize=True)
-    if smiles != "[O]([H])[H]":
-        tmp_mol = Chem.AddHs(tmp_mol, explicitOnly=True)
-        mol = brd.update_atom_bond_props(mol, tmp_mol)
-    else:
-        conf_ids = [conf.GetId() for conf in mol.GetConformers()]
-        if len(conf_ids) > 1:
-            raise ValueError("Ligand molecule has multiple conformers")
-        if tmp_mol.GetAtoms()[0].GetSymbol() != "O":
-            raise ValueError("This should be an oxygen!")
-
-        if metal_connected_orig_indices:
-            tmp_mol.GetAtoms()[0].SetIntProp(
-                "__original_index", metal_connected_orig_indices[0]
-            )
-        tmp_mol.AddConformer(
-            Chem.rdchem.Conformer(tmp_mol.GetNumAtoms()), assignId=True
-        )
-        if metal_connected_orig_indices:
-            brd.copy_atom_coords(
-                tmp_mol, 0, mol, metal_coordinating_indices[0], confId2=conf_ids[0]
-            )
-        mol = Chem.AddHs(tmp_mol, explicitOnly=True, addCoords=True)
-        for a in mol.GetAtoms():
-            if a.HasProp("__original_index"):
-                continue
-            a.SetIntProp(
-                "__original_index", -2
-            )  # Not an atom of consequence and not in the orig mol
+    tmp_mol = Chem.AddHs(tmp_mol, explicitOnly=True)
+    mol = brd.update_atom_bond_props(mol, tmp_mol)
 
     return mol, metal_connected_orig_indices
 
@@ -907,6 +942,12 @@ def get_ligand_attributes(
         _, hanging_bonds_after, charged_atoms_after = brd.assess_atoms(tmp_mol)
         total_charge_after = Chem.GetFormalCharge(tmp_mol)
         # Exception ligands are single-atom or small known motifs; no haptic groups.
+        if total_charge_after < 0:
+            l_conn, x_conn = [], metal_connected_orig_indices
+            eff_l, eff_x = 0, len(metal_connected_orig_indices)
+        else:
+            l_conn, x_conn = metal_connected_orig_indices, []
+            eff_l, eff_x = len(metal_connected_orig_indices), 0
         ligand_candidates.append(
             LigandInfo(
                 index=0,
@@ -914,11 +955,11 @@ def get_ligand_attributes(
                 total_charge=int(total_charge_after),
                 hanging_bonds=hanging_bonds_after,
                 charged_atoms=charged_atoms_after,
-                l_type_connectors=metal_connected_orig_indices,
-                x_type_connectors=[],
+                l_type_connectors=l_conn,
+                x_type_connectors=x_conn,
                 haptic_groups=[],
-                effective_l_count=len(metal_connected_orig_indices),
-                effective_x_count=0,
+                effective_l_count=eff_l,
+                effective_x_count=eff_x,
             )
         )
     else:
@@ -1256,7 +1297,7 @@ def _find_haptic_groups(
 def detect_additional_bonds(
     mol: Chem.rdchem.Mol,
     index: int | None = None,
-    distance_tolerance: float = 0.2,
+    distance_tolerance: float = 0.3,
 ) -> Chem.rdchem.Mol:
     """Use the coordinates to check if any other bonds could be defined.
 
@@ -1631,6 +1672,7 @@ def prepare_complex(
     mol: Chem.rdchem.Mol,
     value_missing_coord: float = 0,
     add_hydrogens: bool = False,
+    distance_tolerance: float = 0.4,
 ) -> Chem.rdchem.Mol:
     """Prepare complex removing anomalous substructs, adding additional metal connections,
     checking for missing coordinates, and possible addition of hydrogens.
@@ -1643,6 +1685,8 @@ def prepare_complex(
         Value used to detect missing coordinates (e.g., 0 for (0,0,0)).
     add_hydrogens : bool, default=False
         If True, add explicit hydrogens to the structure if needed.
+    distance_tolerance : float, default=0.4
+        Tolerance used to detect additional bonds around metal
 
     Returns
     -------
@@ -1658,7 +1702,7 @@ def prepare_complex(
         mol.UpdatePropertyCache(strict=False)
 
     tmc_idx = find_metal_index(mol)
-    mol = detect_additional_bonds(mol)
+    mol = detect_additional_bonds(mol, distance_tolerance=distance_tolerance)
 
     # Detect and correct special cases
     if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene
@@ -1736,6 +1780,7 @@ def _enumerate_ligand_combinations(
 def _score_and_flatten_states(
     tm_mol: Chem.rdchem.Mol,
     ligand_combinations: list[dict],
+    geometry_type: str | None = None,
     target_complex_charge: int = 0,
     target_electron_count: int = 18,
 ) -> list[ComplexState]:
@@ -1747,6 +1792,9 @@ def _score_and_flatten_states(
         Molecule containing the transition metal center.
     ligand_combinations : list of dict
         Candidate ligand assignments from :func:`_enumerate_ligand_combinations`.
+    geometry_type : str or None, default=None
+        Predicted coordination geometry label for the complex, used only for
+        optional geometry-dependent oxidation-state preference weighting.
     target_complex_charge : int, default=0
         Desired total complex charge used for :attr:`ScoreComponents.charge_consistency_penalty`.
     target_electron_count : int, default=18
@@ -1762,6 +1810,7 @@ def _score_and_flatten_states(
 
     metal_symbol = tm_mol.GetAtomWithIdx(0).GetSymbol()
     expected_oxs = set(METALS[metal_symbol].expected_oxidation_states)
+    os_weights = METALS[metal_symbol].oxidation_state_penalties
 
     scored_states: list[ComplexState] = []
     for combo in ligand_combinations:
@@ -1780,6 +1829,12 @@ def _score_and_flatten_states(
         tm_oxs, tm_chgs, tm_nels = get_tm_attributes(tm_mol, n_ltype, n_xtype)
         for tm_ox, tm_chg, tm_nel in zip(tm_oxs, tm_chgs, tm_nels):
             oxidation_penalty = 0 if int(tm_ox) in expected_oxs else 1
+            os_preference_penalty = os_weights.get(int(tm_ox), 0)
+            geom_os_preference_penalty = _get_geometry_os_preference_weight(
+                metal_symbol,
+                geometry_type,
+                int(tm_ox),
+            )
             predicted_complex_charge = int(tm_chg) + total_ligand_charge
             charge_penalty = abs(predicted_complex_charge - target_complex_charge)
             electron_penalty = abs(int(tm_nel) - target_electron_count)
@@ -1798,6 +1853,8 @@ def _score_and_flatten_states(
                 + 1000 * negative_xtype_penalty
                 + 100 * charge_penalty
                 + 10 * electron_penalty
+                + 10 * os_preference_penalty
+                + 20 * geom_os_preference_penalty
                 + residual_valence_penalty
             )
             scored_states.append(
@@ -1811,6 +1868,10 @@ def _score_and_flatten_states(
                         electron_count_penalty=int(electron_penalty),
                         residual_valence_penalty=int(residual_valence_penalty),
                         negative_charge_with_xtype_penalty=int(negative_xtype_penalty),
+                        oxidation_state_preference_penalty=int(os_preference_penalty),
+                        geometry_oxidation_preference_penalty=int(
+                            geom_os_preference_penalty
+                        ),
                     ),
                     predicted_complex_charge=int(predicted_complex_charge),
                     metal=MetalInfo(
@@ -1841,6 +1902,7 @@ def sanitize_complex(
     sanitize: bool = True,
     geometry_method: str = "angles",
     target_charge: int = 0,
+    target_electron_count: int = 18,
     n_results: int | None = 5,
     score_cutoff: int | None = 1000,
     n_per_combination: int | None = None,
@@ -1869,6 +1931,11 @@ def sanitize_complex(
     target_charge : int, default=0
         Desired net charge of the complex, passed to
         :func:`_score_and_flatten_states` as ``target_complex_charge``.
+    target_electron_count : int, default=18
+        Target electron count for the metal centre, passed to
+        :func:`_score_and_flatten_states`.  Useful for electron-deficient
+        complexes such as porphyrins (typically 14–16e) that do not obey the
+        18-electron rule.
     n_results : int or None, default=5
         Maximum number of states to return. ``None`` returns all.
     score_cutoff : int or None, default=1000
@@ -1946,7 +2013,11 @@ def sanitize_complex(
     logger.debug(f"Enumerated {len(ligand_combinations)} ligand combinations")
 
     scored_states = _score_and_flatten_states(
-        tm_mol, ligand_combinations, target_complex_charge=target_charge
+        tm_mol,
+        ligand_combinations,
+        geometry_type=geometry_type,
+        target_complex_charge=target_charge,
+        target_electron_count=target_electron_count,
     )
     logger.debug(
         f"Scoring complete: {len(scored_states)} (ligand combination, oxidation state) pairs"

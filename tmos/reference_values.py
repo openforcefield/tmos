@@ -39,6 +39,14 @@ class MetalDefinition:
         Covalent radius in Å for coordinate-based bond detection.
         ``None`` for elements without tabulated transition-metal radii
         (radius falls back to the ``periodictable`` library or a hard fallback).
+    oxidation_state_penalties : dict[int, int]
+        Per-oxidation-state penalty weights for chemically uncommon but
+        technically valid OS values.  A weight of 0 (default) means no
+        additional preference; higher weights make that OS less preferred.
+        The contribution to the total score is ``10 × weight``, matching the
+        electron-count penalty multiplier so it acts as a tiebreaker among
+        states with identical electron-count and charge penalties.
+        Example: ``{0: 3}`` adds a penalty of 30 to OS=0 assignments.
     geometry_properties : dict[str, dict[str, Any]]
         Optional geometry-dependent metadata keyed by geometry name
         (e.g. ``"tetrahedral"``, ``"square_planar"``, ``"octahedral"``).
@@ -51,6 +59,7 @@ class MetalDefinition:
     group: int
     expected_oxidation_states: list[int]
     covalent_radius: float | None = None
+    oxidation_state_penalties: dict[int, int] = field(default_factory=dict)
     geometry_properties: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -113,6 +122,14 @@ METALS: dict[str, MetalDefinition] = {
         group=8,
         expected_oxidation_states=[-2, -1, 0, 1, 2, 3, 4],
         covalent_radius=1.32,
+        oxidation_state_penalties={0: 3},
+        geometry_properties={
+            "square_pyramidal": {
+                # Fe(I) square-pyramidal assignments are uncommon in this benchmark;
+                # prefer Fe(III)/Fe(II) as a soft tiebreaker.
+                "oxidation_state_penalties": {1: 3, 2: 1, 3: 0},
+            },
+        },
     ),
     "Co": MetalDefinition(
         symbol="Co",
@@ -134,10 +151,12 @@ METALS: dict[str, MetalDefinition] = {
         group=11,
         expected_oxidation_states=[0, 1, 2, 3, 4],
         covalent_radius=1.32,
+        oxidation_state_penalties={0: 3},
         geometry_properties={
             "tetrahedral": {
                 "jahn_teller_active": True,
                 "preferred_substitution": "dissociative",
+                "oxidation_state_penalties": {0: 2, 1: 0, 2: 1, 3: 3, 4: 5},
                 "notes": (
                     "d9 Cu(II) is Jahn-Teller active in Td; geometry distorts "
                     "toward D2d. Ligand exchange is faster than square planar."
@@ -146,10 +165,19 @@ METALS: dict[str, MetalDefinition] = {
             "square_planar": {
                 "jahn_teller_active": False,
                 "preferred_substitution": "associative",
+                "oxidation_state_penalties": {0: 3, 1: 1, 2: 0, 3: 2, 4: 4},
                 "notes": (
                     "Preferred by Cu(II) with strong-field ligands. "
                     "Kinetically more inert than tetrahedral coordination."
                 ),
+            },
+            "trigonal_bipyramidal": {
+                # Five-coordinate Cu(III/IV) does occur, but Cu(II) is generally favored.
+                "oxidation_state_penalties": {0: 4, 1: 2, 2: 0, 3: 1, 4: 3},
+            },
+            "disphenoidal": {
+                # Disphenoidal (seesaw-like) Cu often reflects a distorted Cu(II) manifold.
+                "oxidation_state_penalties": {0: 3, 1: 1, 2: 0, 3: 2, 4: 4},
             },
         },
     ),

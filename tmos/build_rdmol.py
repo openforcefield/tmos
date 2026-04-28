@@ -626,84 +626,84 @@ _CATIONIC_ATOMIC_NUMS: frozenset[int] = frozenset(
 )
 
 
-def _correct_sulfonate_phosphate_interaction(
-    mol: Mol,
-    distances: np.ndarray,
-    r_cut: float = 3.0,
-    dist_frac: float = 0.05,
-) -> list[int]:
-    """Return candidate atom indices to block from metal bonding.
-
-    The heuristic blocks atoms when neighboring electronegative atoms are
-    substantially closer to the metal center.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        Molecule to evaluate.
-    distances : numpy.ndarray
-        Pairwise distance matrix.
-    r_cut : float, default=3.0
-        Distance cutoff (Å) for local metal-neighbor consideration.
-    dist_frac : float, default=0.05
-        Relative closeness threshold for blocking a candidate atom.
-
-    Returns
-    -------
-    list of int
-        Atom indices that should not bond to the metal center.
-    """
-
-    metal_indices = [
-        a.GetIdx() for a in mol.GetAtoms() if is_transition_metal(a.GetSymbol())
-    ]
-    electronegative_sym: list[str] = ["O", "N"]
-    central_sym: list[str] = [
-        "S",
-        "P",
-        "C",
-        "H",
-        "N",
-    ]  # Ensure bonds aren't mistakenly made with these
-
-    possible_central_atoms = set()
-    possible_elec_neg_idx = set()
-    for metal_idx in metal_indices:
-        for i, atm in enumerate(mol.GetAtoms()):
-            if i != metal_idx and distances[metal_idx, i] <= r_cut:
-                if atm.GetSymbol() in electronegative_sym:
-                    possible_elec_neg_idx.add(i)
-                if atm.GetSymbol() in central_sym:
-                    possible_central_atoms.add(atm)
-
-    block_bond_idx = []
-    for atm in possible_central_atoms:
-        # Block hydrogens that are already bonded to something
-        if atm.GetSymbol() == "H" and atm.GetDegree() > 0:
-            block_bond_idx.append(atm.GetIdx())
-            continue
-
-        # Find closest metal to this atom
-        metal_idx = min(metal_indices, key=lambda m: distances[m, atm.GetIdx()])
-        d_center = distances[metal_idx, atm.GetIdx()]
-
-        # Get distances from metal to electronegative neighbors
-        d_connections = np.array(
-            [
-                distances[metal_idx, a.GetIdx()]
-                for b in atm.GetBonds()
-                for a in [b.GetEndAtom(), b.GetBeginAtom()]
-                if a.GetIdx() != atm.GetIdx() and a.GetIdx() in possible_elec_neg_idx
-            ]
-        )
-
-        if (
-            len(d_connections) > 0
-            and np.max((d_center - d_connections) / d_center) > dist_frac
-        ):
-            block_bond_idx.append(atm.GetIdx())
-
-    return block_bond_idx
+# def _correct_sulfonate_phosphate_interaction(
+#    mol: Mol,
+#    distances: np.ndarray,
+#    r_cut: float = 3.0,
+#    dist_frac: float = 0.05,
+# ) -> list[int]:
+#    """Return candidate atom indices to block from metal bonding.
+#
+#    The heuristic blocks atoms when neighboring electronegative atoms are
+#    substantially closer to the metal center.
+#
+#    Parameters
+#    ----------
+#    mol : rdkit.Chem.Mol
+#        Molecule to evaluate.
+#    distances : numpy.ndarray
+#        Pairwise distance matrix.
+#    r_cut : float, default=3.0
+#        Distance cutoff (Å) for local metal-neighbor consideration.
+#    dist_frac : float, default=0.05
+#        Relative closeness threshold for blocking a candidate atom.
+#
+#    Returns
+#    -------
+#    list of int
+#        Atom indices that should not bond to the metal center.
+#    """
+#
+#    metal_indices = [
+#        a.GetIdx() for a in mol.GetAtoms() if is_transition_metal(a.GetSymbol())
+#    ]
+#    electronegative_sym: list[str] = ["O", "N"]
+#    central_sym: list[str] = [
+#        "S",
+#        "P",
+#        "C",
+#        "H",
+#        "N",
+#    ]  # Ensure bonds aren't mistakenly made with these
+#
+#    possible_central_atoms = set()
+#    possible_elec_neg_idx = set()
+#    for metal_idx in metal_indices:
+#        for i, atm in enumerate(mol.GetAtoms()):
+#            if i != metal_idx and distances[metal_idx, i] <= r_cut:
+#                if atm.GetSymbol() in electronegative_sym:
+#                    possible_elec_neg_idx.add(i)
+#                if atm.GetSymbol() in central_sym:
+#                    possible_central_atoms.add(atm)
+#
+#    block_bond_idx = []
+#    for atm in possible_central_atoms:
+#        # Block hydrogens that are already bonded to something
+#        if atm.GetSymbol() == "H" and atm.GetDegree() > 0:
+#            block_bond_idx.append(atm.GetIdx())
+#            continue
+#
+#        # Find closest metal to this atom
+#        metal_idx = min(metal_indices, key=lambda m: distances[m, atm.GetIdx()])
+#        d_center = distances[metal_idx, atm.GetIdx()]
+#
+#        # Get distances from metal to electronegative neighbors
+#        d_connections = np.array(
+#            [
+#                distances[metal_idx, a.GetIdx()]
+#                for b in atm.GetBonds()
+#                for a in [b.GetEndAtom(), b.GetBeginAtom()]
+#                if a.GetIdx() != atm.GetIdx() and a.GetIdx() in possible_elec_neg_idx
+#            ]
+#        )
+#
+#        if (
+#            len(d_connections) > 0
+#            and np.max((d_center - d_connections) / d_center) > dist_frac
+#        ):
+#            block_bond_idx.append(atm.GetIdx())
+#
+#    return block_bond_idx
 
 
 def _max_valence_for_connectivity(
@@ -814,6 +814,85 @@ def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> 
         Molecule with inferred connectivity.
     """
     Chem.rdDetermineBonds.DetermineConnectivity(mol)
+    return mol
+
+
+def _prune_spurious_metal_bonds(mol: Mol, tmc_idx: int) -> Mol:
+    """Remove spurious metal–ligand bonds based on an angle criterion.
+
+    For each pair of metal-bonded atoms (A1, A2) that are also bonded to each
+    other, compute the angles ∠(M–A1–A2) and ∠(M–A2–A1).  If either angle
+    exceeds 90°, the bond from the metal to the *farther* atom is removed.
+
+    This correctly handles:
+    - Spurious bonds: metal lies beyond one end of a covalent A1–A2 bond
+      (e.g. Fe connected to a ring carbon that is not a true donor) — the
+      distant atom gives an obtuse angle.
+    - True haptic bonds: metal hovers above the midpoint of A1–A2, so both
+      angles are acute (< 90°) and neither bond is removed.
+
+    Only the M–Ax bond is removed; the A1–A2 covalent bond is preserved.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        Molecule with connectivity assigned.
+    tmc_idx : int
+        Atom index of the transition metal in *mol*.
+
+    Returns
+    -------
+    rdkit.Chem.Mol
+        Molecule with spurious metal bonds removed.
+    """
+    conf = mol.GetConformer()
+    pos_m = np.array(conf.GetAtomPosition(tmc_idx))
+
+    metal_nbrs = [
+        b.GetOtherAtomIdx(tmc_idx) for b in mol.GetAtomWithIdx(tmc_idx).GetBonds()
+    ]
+    to_remove = set()
+
+    for i, a1 in enumerate(metal_nbrs):
+        for a2 in metal_nbrs[i + 1 :]:
+            if mol.GetBondBetweenAtoms(a1, a2) is None:
+                continue  # not mutually bonded — not relevant
+            pos_a1 = np.array(conf.GetAtomPosition(a1))
+            pos_a2 = np.array(conf.GetAtomPosition(a2))
+            d_m_a1 = np.linalg.norm(pos_m - pos_a1)
+            d_m_a2 = np.linalg.norm(pos_m - pos_a2)
+
+            # Angle at A1: M-A1-A2
+            v1m = pos_m - pos_a1
+            v12 = pos_a2 - pos_a1
+            cos1 = np.dot(v1m, v12) / (np.linalg.norm(v1m) * np.linalg.norm(v12))
+            angle_at_a1 = np.degrees(np.arccos(np.clip(cos1, -1, 1)))
+
+            # Angle at A2: M-A2-A1
+            v2m = pos_m - pos_a2
+            v21 = pos_a1 - pos_a2
+            cos2 = np.dot(v2m, v21) / (np.linalg.norm(v2m) * np.linalg.norm(v21))
+            angle_at_a2 = np.degrees(np.arccos(np.clip(cos2, -1, 1)))
+
+            if angle_at_a1 > 90 or angle_at_a2 > 90:
+                # Remove bond to the farther atom
+                farther = a2 if d_m_a2 >= d_m_a1 else a1
+                to_remove.add(farther)
+                logger.debug(
+                    "Pruning spurious M–%s bond (d=%.3f Å): "
+                    "∠(M–A1–A2)=%.1f°, ∠(M–A2–A1)=%.1f°",
+                    farther,
+                    max(d_m_a1, d_m_a2),
+                    angle_at_a1,
+                    angle_at_a2,
+                )
+
+    if to_remove:
+        rw = Chem.RWMol(mol)
+        for idx in to_remove:
+            rw.RemoveBond(tmc_idx, idx)
+        return rw.GetMol()
+
     return mol
 
 
@@ -951,9 +1030,10 @@ def _determine_connectivity_custom(
         degrees[j] += 1
 
     if metal_idx is not None:
-        for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
-            if mol.GetBondBetweenAtoms(metal_idx, idx) is not None:
-                mol.RemoveBond(metal_idx, idx)
+        # for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
+        #    if mol.GetBondBetweenAtoms(metal_idx, idx) is not None:
+        #        mol.RemoveBond(metal_idx, idx)
+        return _prune_spurious_metal_bonds(mol.GetMol(), metal_idx)
 
     return mol.GetMol()
 
