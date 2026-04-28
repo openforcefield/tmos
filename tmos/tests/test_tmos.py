@@ -4,12 +4,15 @@ Unit and regression test for the tmos package.
 
 # Import package, test suite, and other packages as needed
 import sys
+import json
 
 import pytest
 import numpy as np
 from rdkit import Chem
+from rdkit.Geometry import Point3D
 
 from tmos import tmos as tmos_module
+from tmos import utils as utils_module
 
 
 def test_tmos_imported():
@@ -601,3 +604,209 @@ def test_sanitize_complex_score_cutoff_filters_states(monkeypatch):
 
     assert len(outputs) == 1
     assert outputs[0].score == 0
+
+
+def test_complex_state_to_dict_multimetal_compatible_schema():
+    """Serialized state includes a metals list for forward compatibility."""
+    mol = Chem.MolFromSmiles("C=C")
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    conf.SetAtomPosition(0, Point3D(0.0, 0.0, 0.0))
+    conf.SetAtomPosition(1, Point3D(1.33, 0.0, 0.0))
+    mol.AddConformer(conf)
+
+    state = tmos_module.ComplexState(
+        score=12,
+        score_components=tmos_module.ScoreComponents(
+            target_complex_charge=0,
+            target_electron_count=18,
+            oxidation_membership_penalty=0,
+            charge_consistency_penalty=0,
+            electron_count_penalty=1,
+            residual_valence_penalty=2,
+            negative_charge_with_xtype_penalty=0,
+            oxidation_state_preference_penalty=0,
+            geometry_oxidation_preference_penalty=0,
+        ),
+        predicted_complex_charge=0,
+        metal=tmos_module.MetalInfo(
+            symbol="Fe",
+            oxidation_state=2,
+            charge=2,
+            electron_count=18,
+        ),
+        ligands=tmos_module.LigandSummary(
+            ligand_info=[],
+            candidate_ids=[],
+            number_Ltype_connectors=0,
+            number_Xtype_connectors=0,
+            total_charge=-2,
+        ),
+        complex=tmos_module.ComplexInfo(
+            rdmol=mol,
+            smiles="C=C",
+            formula="C2",
+            charge=0,
+            number_metal_connections=0,
+            geometry_type="linear",
+        ),
+    )
+
+    payload = state.to_dict(include_graph=True, coordinate_units="angstrom")
+
+    assert payload["schema_version"] == 1
+    assert isinstance(payload["metals_summary"], dict)
+    assert payload["metals_summary"]["metal_info"][0]["symbol"] == "Fe"
+    assert payload["metals_summary"]["total_charge"] == 2
+    assert payload["metals_summary"]["total_electron_count"] == 18
+    assert isinstance(payload["metals"], list)
+    assert len(payload["metals"]) == 1
+    assert payload["metals"][0]["symbol"] == "Fe"
+    assert "metal" not in payload
+    assert payload["complex"]["graph"]["atoms"][0]["symbol"] == "C"
+    assert payload["complex"]["graph"]["bonds"][0]["order"] == 2.0
+    assert payload["complex"]["graph"]["positions"]["units"] == "angstrom"
+    assert len(payload["complex"]["graph"]["positions"]["coordinates"]) == 2
+
+
+def test_complex_state_to_dict_can_skip_graph_payload():
+    """Graph export should be optional for lightweight serialization."""
+    state = tmos_module.ComplexState(
+        score=0,
+        score_components=tmos_module.ScoreComponents(
+            target_complex_charge=0,
+            target_electron_count=18,
+            oxidation_membership_penalty=0,
+            charge_consistency_penalty=0,
+            electron_count_penalty=0,
+            residual_valence_penalty=0,
+            negative_charge_with_xtype_penalty=0,
+        ),
+        predicted_complex_charge=0,
+        metal=tmos_module.MetalInfo(
+            symbol="Fe",
+            oxidation_state=2,
+            charge=2,
+            electron_count=18,
+        ),
+        ligands=tmos_module.LigandSummary(
+            ligand_info=[],
+            candidate_ids=[],
+            number_Ltype_connectors=0,
+            number_Xtype_connectors=0,
+            total_charge=-2,
+        ),
+        complex=tmos_module.ComplexInfo(
+            rdmol=Chem.MolFromSmiles("C"),
+            smiles="C",
+            formula="C1",
+            charge=0,
+            number_metal_connections=0,
+            geometry_type="unknown",
+        ),
+    )
+
+    payload = state.to_dict(include_graph=False)
+
+    assert "graph" not in payload["complex"]
+    assert payload["metals"][0]["symbol"] == "Fe"
+
+
+def test_save_complex_states_to_json_writes_schema_payload(tmp_path):
+    """Utility should write serialized state payloads to disk."""
+    mol = Chem.MolFromSmiles("C=C")
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    conf.SetAtomPosition(0, Point3D(0.0, 0.0, 0.0))
+    conf.SetAtomPosition(1, Point3D(1.33, 0.0, 0.0))
+    mol.AddConformer(conf)
+
+    state = tmos_module.ComplexState(
+        score=12,
+        score_components=tmos_module.ScoreComponents(
+            target_complex_charge=0,
+            target_electron_count=18,
+            oxidation_membership_penalty=0,
+            charge_consistency_penalty=0,
+            electron_count_penalty=1,
+            residual_valence_penalty=2,
+            negative_charge_with_xtype_penalty=0,
+        ),
+        predicted_complex_charge=0,
+        metal=tmos_module.MetalInfo(
+            symbol="Fe",
+            oxidation_state=2,
+            charge=2,
+            electron_count=18,
+        ),
+        ligands=tmos_module.LigandSummary(
+            ligand_info=[],
+            candidate_ids=[],
+            number_Ltype_connectors=0,
+            number_Xtype_connectors=0,
+            total_charge=-2,
+        ),
+        complex=tmos_module.ComplexInfo(
+            rdmol=mol,
+            smiles="C=C",
+            formula="C2",
+            charge=0,
+            number_metal_connections=0,
+            geometry_type="linear",
+        ),
+    )
+
+    out = tmp_path / "states.json"
+    utils_module.save_complex_states_to_json([state], str(out), include_graph=True)
+
+    with out.open() as f:
+        payload = json.load(f)
+
+    assert isinstance(payload, list)
+    assert payload[0]["metals_summary"]["metal_info"][0]["symbol"] == "Fe"
+    assert payload[0]["metals"][0]["symbol"] == "Fe"
+    assert payload[0]["complex"]["graph"]["bonds"][0]["order"] == 2.0
+
+
+def test_save_complex_states_to_json_respects_include_graph_false(tmp_path):
+    """Graph payload should be omitted when include_graph is False."""
+    state = tmos_module.ComplexState(
+        score=0,
+        score_components=tmos_module.ScoreComponents(
+            target_complex_charge=0,
+            target_electron_count=18,
+            oxidation_membership_penalty=0,
+            charge_consistency_penalty=0,
+            electron_count_penalty=0,
+            residual_valence_penalty=0,
+            negative_charge_with_xtype_penalty=0,
+        ),
+        predicted_complex_charge=0,
+        metal=tmos_module.MetalInfo(
+            symbol="Fe",
+            oxidation_state=2,
+            charge=2,
+            electron_count=18,
+        ),
+        ligands=tmos_module.LigandSummary(
+            ligand_info=[],
+            candidate_ids=[],
+            number_Ltype_connectors=0,
+            number_Xtype_connectors=0,
+            total_charge=-2,
+        ),
+        complex=tmos_module.ComplexInfo(
+            rdmol=Chem.MolFromSmiles("C"),
+            smiles="C",
+            formula="C1",
+            charge=0,
+            number_metal_connections=0,
+            geometry_type="unknown",
+        ),
+    )
+
+    out = tmp_path / "states_no_graph.json"
+    utils_module.save_complex_states_to_json([state], str(out), include_graph=False)
+
+    with out.open() as f:
+        payload = json.load(f)
+
+    assert "graph" not in payload[0]["complex"]

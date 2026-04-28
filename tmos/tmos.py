@@ -211,6 +211,32 @@ class LigandInfo:
             lines.append(f"  Haptic: {', '.join(haptic_parts)}")
         return "\n".join(lines)
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize ligand info without embedding RDKit objects."""
+        charged_atoms = []
+        for atom_idx, props in sorted((self.charged_atoms or {}).items()):
+            charged_atoms.append(
+                {
+                    "atom_index": int(atom_idx),
+                    "properties": _json_compatible(props),
+                }
+            )
+
+        return {
+            "index": self.index,
+            "smiles": self.smiles,
+            "chemical_formula": self.chemical_formula,
+            "candidate_id": self.candidate_id,
+            "total_charge": self.total_charge,
+            "hanging_bonds": self.hanging_bonds,
+            "charged_atoms": charged_atoms,
+            "l_type_connectors": list(self.l_type_connectors or []),
+            "x_type_connectors": list(self.x_type_connectors or []),
+            "haptic_groups": [list(g) for g in (self.haptic_groups or [])],
+            "effective_l_count": self.effective_l_count,
+            "effective_x_count": self.effective_x_count,
+        }
+
 
 @dataclass
 class ScoreComponents:
@@ -290,6 +316,26 @@ class ScoreComponents:
             ]
         )
 
+    def to_dict(self) -> dict[str, int]:
+        """Serialize all score components as plain integers."""
+        return {
+            "target_complex_charge": int(self.target_complex_charge),
+            "target_electron_count": int(self.target_electron_count),
+            "oxidation_membership_penalty": int(self.oxidation_membership_penalty),
+            "charge_consistency_penalty": int(self.charge_consistency_penalty),
+            "electron_count_penalty": int(self.electron_count_penalty),
+            "residual_valence_penalty": int(self.residual_valence_penalty),
+            "negative_charge_with_xtype_penalty": int(
+                self.negative_charge_with_xtype_penalty
+            ),
+            "oxidation_state_preference_penalty": int(
+                self.oxidation_state_preference_penalty
+            ),
+            "geometry_oxidation_preference_penalty": int(
+                self.geometry_oxidation_preference_penalty
+            ),
+        }
+
 
 def _normalize_geometry_key(geometry_name: str) -> str:
     """Canonicalize geometry labels for dictionary lookups.
@@ -336,6 +382,65 @@ def _get_geometry_os_preference_weight(
     return int(os_weights.get(int(oxidation_state), 0))
 
 
+def _json_compatible(value: Any) -> Any:
+    """Convert values into JSON-compatible Python primitives."""
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(k): _json_compatible(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(v) for v in value]
+    return value
+
+
+def _serialize_rdmol_graph(
+    mol: Chem.rdchem.Mol | None,
+    coordinate_units: str = "angstrom",
+) -> dict[str, Any] | None:
+    """Serialize an RDKit molecule to atom/bond/position graph data."""
+    if mol is None:
+        return None
+
+    atoms: list[dict[str, Any]] = []
+    for atom in mol.GetAtoms():
+        atoms.append(
+            {
+                "index": int(atom.GetIdx()),
+                "symbol": atom.GetSymbol(),
+                "atomic_number": int(atom.GetAtomicNum()),
+                "formal_charge": int(atom.GetFormalCharge()),
+                "is_aromatic": bool(atom.GetIsAromatic()),
+            }
+        )
+
+    bonds: list[dict[str, Any]] = []
+    for bond in mol.GetBonds():
+        bonds.append(
+            {
+                "begin": int(bond.GetBeginAtomIdx()),
+                "end": int(bond.GetEndAtomIdx()),
+                "order": float(bond.GetBondTypeAsDouble()),
+                "bond_type": str(bond.GetBondType()),
+                "is_aromatic": bool(bond.GetIsAromatic()),
+            }
+        )
+
+    positions: dict[str, Any] | None = None
+    if mol.GetNumConformers() > 0:
+        conf = mol.GetConformer()
+        coordinates: list[list[float]] = []
+        for idx in range(mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(idx)
+            coordinates.append([float(pos.x), float(pos.y), float(pos.z)])
+        positions = {"units": coordinate_units, "coordinates": coordinates}
+
+    return {"atoms": atoms, "bonds": bonds, "positions": positions}
+
+
 @dataclass
 class MetalInfo:
     """Properties of the transition-metal center.
@@ -371,6 +476,15 @@ class MetalInfo:
             else str(self.oxidation_state)
         )
         return f"{self.symbol}({ox_str}), charge={charge_str}, {self.electron_count} electron(s)"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize metal-center properties."""
+        return {
+            "symbol": self.symbol,
+            "oxidation_state": int(self.oxidation_state),
+            "charge": int(self.charge),
+            "electron_count": int(self.electron_count),
+        }
 
 
 @dataclass
@@ -437,6 +551,20 @@ class LigandSummary:
         )
         return f"{len(self.ligand_info)} ligand(s), {self.number_Ltype_connectors}L/{self.number_Xtype_connectors}X donors, total charge={charge_str}{haptic_str}"
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize ligand summary data and per-ligand descriptors."""
+        return {
+            "candidate_ids": list(self.candidate_ids),
+            "number_Ltype_connectors": int(self.number_Ltype_connectors),
+            "number_Xtype_connectors": int(self.number_Xtype_connectors),
+            "total_charge": int(self.total_charge),
+            "haptic_group_counts": {
+                str(k): int(v)
+                for k, v in sorted((self.haptic_group_counts or {}).items())
+            },
+            "ligand_info": [li.to_dict() for li in self.ligand_info],
+        }
+
 
 @dataclass
 class ComplexInfo:
@@ -486,6 +614,26 @@ class ComplexInfo:
             else 0
         )
         return f"{formula_str}, charge={charge_str}, {geom} ({n_bonds} bond(s))"
+
+    def to_dict(
+        self,
+        include_graph: bool = True,
+        coordinate_units: str = "angstrom",
+    ) -> dict[str, Any]:
+        """Serialize assembled-complex metadata and optional graph payload."""
+        payload: dict[str, Any] = {
+            "smiles": self.smiles,
+            "formula": self.formula,
+            "charge": self.charge,
+            "number_metal_connections": self.number_metal_connections,
+            "geometry_type": self.geometry_type,
+        }
+        if include_graph:
+            payload["graph"] = _serialize_rdmol_graph(
+                self.rdmol,
+                coordinate_units=coordinate_units,
+            )
+        return payload
 
 
 @dataclass
@@ -553,6 +701,69 @@ class ComplexState:
                 f"valence={sc.residual_valence_penalty}×1"
             )
         return "\n".join(lines)
+
+    def to_dict(
+        self,
+        include_graph: bool = True,
+        coordinate_units: str = "angstrom",
+        schema_version: int = 1,
+    ) -> dict[str, Any]:
+        """Serialize a scored state with a multi-metal-compatible schema.
+
+        Notes
+        -----
+        The current processing pipeline predicts a single metal center.
+        The serialized payload includes a ``metals_summary`` object for
+        forward-compatible multi-metal schemas.
+        """
+        metals = [self.metal.to_dict()] if self.metal is not None else []
+        metals_summary = {
+            "metal_info": metals,
+            "total_charge": int(sum(m.get("charge", 0) for m in metals)),
+            "total_electron_count": int(
+                sum(m.get("electron_count", 0) for m in metals)
+            ),
+        }
+        payload: dict[str, Any] = {
+            "schema_version": int(schema_version),
+            "score": self.score,
+            "predicted_complex_charge": self.predicted_complex_charge,
+            "metals_summary": metals_summary,
+            "metals": metals,
+            "ligands": self.ligands.to_dict() if self.ligands is not None else None,
+            "complex": (
+                self.complex.to_dict(
+                    include_graph=include_graph,
+                    coordinate_units=coordinate_units,
+                )
+                if self.complex is not None
+                else None
+            ),
+            "score_components": (
+                self.score_components.to_dict()
+                if self.score_components is not None
+                else None
+            ),
+        }
+        return _json_compatible(payload)
+
+    def to_json(
+        self,
+        indent: int = 2,
+        include_graph: bool = True,
+        coordinate_units: str = "angstrom",
+        schema_version: int = 1,
+    ) -> str:
+        """Serialize this state to a JSON string."""
+        return json.dumps(
+            self.to_dict(
+                include_graph=include_graph,
+                coordinate_units=coordinate_units,
+                schema_version=schema_version,
+            ),
+            indent=indent,
+            sort_keys=True,
+        )
 
 
 # Initialize logger with INFO level by default
