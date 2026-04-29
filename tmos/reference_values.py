@@ -73,12 +73,14 @@ METALS: dict[str, MetalDefinition] = {
         atomic_number=3,
         group=1,
         expected_oxidation_states=[1],
+        covalent_radius=1.34,
     ),
     "Mg": MetalDefinition(
         symbol="Mg",
         atomic_number=12,
         group=2,
         expected_oxidation_states=[2],
+        covalent_radius=1.30,
     ),
     # First-row transition metals
     "Sc": MetalDefinition(

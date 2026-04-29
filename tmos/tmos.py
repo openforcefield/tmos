@@ -1522,7 +1522,6 @@ def detect_additional_bonds(
         Index of target atom to look for bonds. If None, all bonds are added.
     distance_tolerance : float, default=0.2
         Additional distance tolerance used by coordinate-based bond detection.
-
     Returns
     -------
     rdkit.Chem.rdchem.Mol
@@ -1650,7 +1649,10 @@ def find_missing_coords(mol: Chem.rdchem.Mol, value: float = 0) -> bool:
         RDKit molecule to assess
     value : float, default=0
         Value used to compare to coordinates.
-        If the sum across all dimensions for one atom is equal to this value, then a coordinate is missing.
+        If all three coordinates for a non-metal atom equal this value, then a
+        coordinate is considered missing.  Metal centres are excluded because
+        Architector (and other builders) routinely place the metal at the
+        coordinate origin, which is a valid geometry, not a missing datum.
 
     Returns
     -------
@@ -1660,9 +1662,13 @@ def find_missing_coords(mol: Chem.rdchem.Mol, value: float = 0) -> bool:
 
     conf = mol.GetConformer()
     positions = conf.GetPositions()
-    pos_sum = np.sum(positions, axis=-1)
-
-    return any(pos_sum == value)
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() in _METALS_ATOMIC_NUMS:
+            continue
+        pos = positions[atom.GetIdx()]
+        if np.all(pos == value):
+            return True
+    return False
 
 
 def fix_missing_coords(
@@ -1885,7 +1891,7 @@ def prepare_complex(
     mol: Chem.rdchem.Mol,
     value_missing_coord: float = 0,
     add_hydrogens: bool = False,
-    distance_tolerance: float = 0.4,
+    distance_tolerance: float = 0.5,
 ) -> Chem.rdchem.Mol:
     """Prepare complex removing anomalous substructs, adding additional metal connections,
     checking for missing coordinates, and possible addition of hydrogens.
@@ -1915,7 +1921,10 @@ def prepare_complex(
         mol.UpdatePropertyCache(strict=False)
 
     tmc_idx = find_metal_index(mol)
-    mol = detect_additional_bonds(mol, distance_tolerance=distance_tolerance)
+    mol = detect_additional_bonds(
+        mol,
+        distance_tolerance=distance_tolerance,
+    )
 
     # Detect and correct special cases
     if mol.GetAtoms()[tmc_idx].GetDegree() == 10:  # Detect ferrocene

@@ -432,7 +432,6 @@ def xyz_to_rdkit(
     ignore_scale : bool, default=False
         If True avoid an error when "H" is present and the minimum atomic distance is not between
         0.8 Å and 1.5 Å.
-
     Returns
     -------
     rdkit.Chem.Mol
@@ -480,7 +479,9 @@ def xyz_to_rdkit(
     mol.UpdatePropertyCache(strict=False)
     mol = mol.GetMol()
     mol = determine_connectivity(
-        mol, distance_tolerance=distance_tolerance, method=method
+        mol,
+        distance_tolerance=distance_tolerance,
+        method=method,
     )
     mol.UpdatePropertyCache(strict=False)
     try:
@@ -521,7 +522,6 @@ def determine_connectivity(
 
     distance_tolerance : float, default=0.2
         Additional tolerance for bond distance cutoffs (Å).
-
     Returns
     -------
     rdkit.Chem.Mol
@@ -544,7 +544,8 @@ def determine_connectivity(
         return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
     elif method == "custom":
         return _determine_connectivity_custom(
-            rdkit_mol, max_distance_tolerance=distance_tolerance
+            rdkit_mol,
+            max_distance_tolerance=distance_tolerance,
         )
     else:
         raise ValueError(
@@ -921,7 +922,6 @@ def _determine_connectivity_custom(
         Maximum extra distance (Å) above radius sum for bond formation.
     min_distance_tolerance : float, default=0.45
         Minimum distance (Å) below which atoms are considered too close.
-
     Returns
     -------
     rdkit.Chem.Mol
@@ -999,8 +999,18 @@ def _determine_connectivity_custom(
     for d, i, j in candidate_pairs:
         if mol.GetBondBetweenAtoms(i, j) is not None:
             continue
+        i_is_tm = is_transition_metal(symbols[i])
+        j_is_tm = is_transition_metal(symbols[j])
+        one_is_tm = i_is_tm or j_is_tm
+
+        # When this candidate is a TM-involving bond, the non-TM donor atom
+        # gets one free slot beyond its neutral max valencefor possible
+        # dative coordination.
+        i_degree_for_cap = degrees[i] - (1 if one_is_tm and not i_is_tm else 0)
+        j_degree_for_cap = degrees[j] - (1 if one_is_tm and not j_is_tm else 0)
+
         # Rule 1 — hard cap: neither atom may exceed its maximum valence.
-        if degrees[i] >= max_valences[i] or degrees[j] >= max_valences[j]:
+        if i_degree_for_cap >= max_valences[i] or j_degree_for_cap >= max_valences[j]:
             continue
 
         # Rule 2 — soft satisfied skip: if *both* endpoints already sit at
