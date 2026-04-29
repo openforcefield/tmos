@@ -1891,7 +1891,7 @@ def prepare_complex(
     mol: Chem.rdchem.Mol,
     value_missing_coord: float = 0,
     add_hydrogens: bool = False,
-    distance_tolerance: float = 0.5,
+    distance_tolerance: float = 0.4,
 ) -> Chem.rdchem.Mol:
     """Prepare complex removing anomalous substructs, adding additional metal connections,
     checking for missing coordinates, and possible addition of hydrogens.
