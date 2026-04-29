@@ -626,6 +626,24 @@ _CATIONIC_ATOMIC_NUMS: frozenset[int] = frozenset(
     }
 )
 
+# Atomic numbers of elements that carry accessible lone pairs and are
+# chemically meaningful metal donor atoms.  The TM-aware cap relaxation
+# (−1 on degree when forming a metal bond) is restricted to these elements
+# so that saturated sp3 carbons (degree=4, no lone pair) are not spuriously
+# allowed to bond to a metal centre.
+_LONE_PAIR_DONOR_ATOMIC_NUMS: frozenset[int] = frozenset(
+    {
+        7,  # N  — amine, ammonia, nitrile …
+        8,  # O  — water, hydroxyl, ether …
+        9,  # F  — fluoride
+        15,  # P  — phosphine, phosphido …
+        16,  # S  — thioether, thiol …
+        17,  # Cl — chloride
+        35,  # Br — bromide
+        53,  # I  — iodide
+    }
+)
+
 
 # def _correct_sulfonate_phosphate_interaction(
 #    mol: Mol,
@@ -818,7 +836,7 @@ def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> 
     return mol
 
 
-def _prune_spurious_metal_bonds(mol: Mol, tmc_idx: int) -> Mol:
+def _prune_spurious_metal_bonds(mol: Mol, tmc_idx: int, max_angle: float = 85) -> Mol:
     """Remove spurious metal–ligand bonds based on an angle criterion.
 
     For each pair of metal-bonded atoms (A1, A2) that are also bonded to each
@@ -840,6 +858,8 @@ def _prune_spurious_metal_bonds(mol: Mol, tmc_idx: int) -> Mol:
         Molecule with connectivity assigned.
     tmc_idx : int
         Atom index of the transition metal in *mol*.
+    max_angle : float, default=90
+        Maximum angle below which a bond can be considered haptic
 
     Returns
     -------
@@ -875,7 +895,7 @@ def _prune_spurious_metal_bonds(mol: Mol, tmc_idx: int) -> Mol:
             cos2 = np.dot(v2m, v21) / (np.linalg.norm(v2m) * np.linalg.norm(v21))
             angle_at_a2 = np.degrees(np.arccos(np.clip(cos2, -1, 1)))
 
-            if angle_at_a1 > 90 or angle_at_a2 > 90:
+            if angle_at_a1 > max_angle or angle_at_a2 > max_angle:
                 # Remove bond to the farther atom
                 farther = a2 if d_m_a2 >= d_m_a1 else a1
                 to_remove.add(farther)
@@ -999,15 +1019,27 @@ def _determine_connectivity_custom(
     for d, i, j in candidate_pairs:
         if mol.GetBondBetweenAtoms(i, j) is not None:
             continue
+        # Hydrogen must bond only to heavy atoms (atomic_num > 1).
+        if atomic_nums[i] == 1 and atomic_nums[j] == 1:
+            continue
+
         i_is_tm = is_transition_metal(symbols[i])
         j_is_tm = is_transition_metal(symbols[j])
         one_is_tm = i_is_tm or j_is_tm
 
-        # When this candidate is a TM-involving bond, the non-TM donor atom
-        # gets one free slot beyond its neutral max valencefor possible
-        # dative coordination.
-        i_degree_for_cap = degrees[i] - (1 if one_is_tm and not i_is_tm else 0)
-        j_degree_for_cap = degrees[j] - (1 if one_is_tm and not j_is_tm else 0)
+        # When this candidate is a TM-involving bond, lone-pair donor atoms
+        # (O, N, S, P, halogens) get one free slot beyond their neutral max
+        # valence for dative coordination.  Carbon and other non-donor atoms
+        # are excluded: a saturated sp3 carbon has no lone pair and must not
+        # form a spurious extra bond to the metal.
+        i_is_lp_donor = atomic_nums[i] in _LONE_PAIR_DONOR_ATOMIC_NUMS
+        j_is_lp_donor = atomic_nums[j] in _LONE_PAIR_DONOR_ATOMIC_NUMS
+        i_degree_for_cap = degrees[i] - (
+            1 if one_is_tm and not i_is_tm and i_is_lp_donor else 0
+        )
+        j_degree_for_cap = degrees[j] - (
+            1 if one_is_tm and not j_is_tm and j_is_lp_donor else 0
+        )
 
         # Rule 1 — hard cap: neither atom may exceed its maximum valence.
         if i_degree_for_cap >= max_valences[i] or j_degree_for_cap >= max_valences[j]:
