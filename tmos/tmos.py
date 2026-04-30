@@ -1509,7 +1509,7 @@ def _find_haptic_groups(
 
 def detect_additional_bonds(
     mol: Chem.rdchem.Mol,
-    index: int | None = None,
+    indices: list[int] | None = None,
     distance_tolerance: float = 0.3,
 ) -> Chem.rdchem.Mol:
     """Use the coordinates to check if any other bonds could be defined.
@@ -1518,7 +1518,7 @@ def detect_additional_bonds(
     ----------
     mol : rdkit.Chem.rdchem.Mol
         RDKit molecule
-    index : int or None, default=None
+    indices : list[int] or None, default=None
         Index of target atom to look for bonds. If None, all bonds are added.
     distance_tolerance : float, default=0.2
         Additional distance tolerance used by coordinate-based bond detection.
@@ -1545,7 +1545,7 @@ def detect_additional_bonds(
     for bond in new_mol.GetBonds():
         idx1, idx2 = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
         if mol.GetBondBetweenAtoms(idx1, idx2) is None and (
-            index is None or index in [idx1, idx2]
+            indices is None or idx1 in indices or idx2 in indices
         ):
             atom1, atom2 = mol.GetAtomWithIdx(idx1), mol.GetAtomWithIdx(idx2)
             if (atom1.GetSymbol() == "H" and len(atom1.GetBonds()) >= 1) or (
