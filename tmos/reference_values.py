@@ -3,53 +3,364 @@
 References include:
  - bond_type_dict: (dict) Given a bond order float, a RDKit bond type class instance is returned
  - bond_order_dict: (dict) Given a RDKit bond type string, a bond order float is returned
- - expected_oxidation_states: (dict) Dictionary that provides a list of expected oxidation states given a elemental symbol.
+ - METALS: (dict) Registry of :class:`MetalDefinition` objects keyed by element symbol,
+   containing per-metal atomic number, group, oxidation states, covalent radius, and
+   optional geometry-dependent properties.
  - ideal_angles: (dict): Given the number of atoms around a center get a dictionary of possible geometries and the angles associated
  with that geometry in ascending order.
- - METALS_NUM: (list) A list of atomic numbers for transition metal complexes
- - transition_metal_covalent_radii: (dict) Given the element symbol, the covalent radii of transition metals is returned
 
 """
 
-import numpy as np
+from dataclasses import dataclass, field
+from typing import Any
 
+import numpy as np
 from rdkit import Chem
 
-METALS_NUM = [
-    3,
-    12,
-    21,
-    22,
-    23,
-    24,
-    25,
-    26,
-    27,
-    57,
-    28,
-    29,
-    30,
-    39,
-    40,
-    41,
-    42,
-    43,
-    44,
-    45,
-    46,
-    47,
-    48,
-    71,
-    72,
-    73,
-    74,
-    75,
-    76,
-    77,
-    78,
-    79,
-    80,
-]
+
+@dataclass
+class MetalDefinition:
+    """Properties of a metal center supported by tmos.
+
+    Attributes
+    ----------
+    symbol : str
+        Element symbol.
+    atomic_number : int
+        Atomic number.
+    group : int
+        Periodic-table group number (1–12), used in the CBC electron-count
+        formula: ``metal_charge = group + n_X + 2*n_L - n_electrons``.
+    expected_oxidation_states : list[int]
+        Sorted ascending list of chemically reasonable oxidation states.
+        States outside this list incur the ``oxidation_membership_penalty``
+        (weighted ×1000) in scoring.
+    covalent_radius : float or None
+        Covalent radius in Å for coordinate-based bond detection.
+        ``None`` for elements without tabulated transition-metal radii
+        (radius falls back to the ``periodictable`` library or a hard fallback).
+    oxidation_state_penalties : dict[int, int]
+        Per-oxidation-state penalty weights for chemically uncommon but
+        technically valid OS values.  A weight of 0 (default) means no
+        additional preference; higher weights make that OS less preferred.
+        The contribution to the total score is ``10 × weight``, matching the
+        electron-count penalty multiplier so it acts as a tiebreaker among
+        states with identical electron-count and charge penalties.
+        Example: ``{0: 3}`` adds a penalty of 30 to OS=0 assignments.
+    geometry_properties : dict[str, dict[str, Any]]
+        Optional geometry-dependent metadata keyed by geometry name
+        (e.g. ``"tetrahedral"``, ``"square_planar"``, ``"octahedral"``).
+        Values are free-form dicts; no schema is enforced. Intended as an
+        extension point for geometry-specific reactivity data.
+    """
+
+    symbol: str
+    atomic_number: int
+    group: int
+    expected_oxidation_states: list[int]
+    covalent_radius: float | None = None
+    oxidation_state_penalties: dict[int, int] = field(default_factory=dict)
+    geometry_properties: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+# Registry of all metals supported by tmos, keyed by element symbol.
+# Atomic numbers in this registry define which atoms are treated as metal
+# centers throughout the codebase. When adding a new element, add a
+# MetalDefinition entry here; no other file needs to be updated.
+METALS: dict[str, MetalDefinition] = {
+    "Li": MetalDefinition(
+        symbol="Li",
+        atomic_number=3,
+        group=1,
+        expected_oxidation_states=[1],
+        covalent_radius=1.34,
+    ),
+    "Mg": MetalDefinition(
+        symbol="Mg",
+        atomic_number=12,
+        group=2,
+        expected_oxidation_states=[2],
+        covalent_radius=1.30,
+    ),
+    # First-row transition metals
+    "Sc": MetalDefinition(
+        symbol="Sc",
+        atomic_number=21,
+        group=3,
+        expected_oxidation_states=[3],
+        covalent_radius=1.70,
+    ),
+    "Ti": MetalDefinition(
+        symbol="Ti",
+        atomic_number=22,
+        group=4,
+        expected_oxidation_states=[2, 3, 4],
+        covalent_radius=1.60,
+    ),
+    "V": MetalDefinition(
+        symbol="V",
+        atomic_number=23,
+        group=5,
+        expected_oxidation_states=[0, 1, 2, 3, 4, 5],
+        covalent_radius=1.53,
+    ),
+    "Cr": MetalDefinition(
+        symbol="Cr",
+        atomic_number=24,
+        group=6,
+        expected_oxidation_states=[-2, -1, 0, 1, 2, 3, 4, 5, 6],
+        covalent_radius=1.39,
+    ),
+    "Mn": MetalDefinition(
+        symbol="Mn",
+        atomic_number=25,
+        group=7,
+        expected_oxidation_states=[-2, -1, 0, 1, 2, 3, 4, 5, 6, 7],
+        covalent_radius=1.39,
+    ),
+    "Fe": MetalDefinition(
+        symbol="Fe",
+        atomic_number=26,
+        group=8,
+        expected_oxidation_states=[-2, -1, 0, 1, 2, 3, 4],
+        covalent_radius=1.32,
+        oxidation_state_penalties={0: 3},
+        geometry_properties={
+            "square_pyramidal": {
+                # Fe(I) square-pyramidal assignments are uncommon in this benchmark;
+                # prefer Fe(III)/Fe(II) as a soft tiebreaker.
+                "oxidation_state_penalties": {1: 3, 2: 1, 3: 0},
+            },
+        },
+    ),
+    "Co": MetalDefinition(
+        symbol="Co",
+        atomic_number=27,
+        group=9,
+        expected_oxidation_states=[-1, 0, 1, 2, 3, 4],
+        covalent_radius=1.26,
+    ),
+    "Ni": MetalDefinition(
+        symbol="Ni",
+        atomic_number=28,
+        group=10,
+        expected_oxidation_states=[-1, 0, 1, 2, 3, 4],
+        covalent_radius=1.24,
+    ),
+    "Cu": MetalDefinition(
+        symbol="Cu",
+        atomic_number=29,
+        group=11,
+        expected_oxidation_states=[0, 1, 2, 3, 4],
+        covalent_radius=1.32,
+        oxidation_state_penalties={0: 3},
+        geometry_properties={
+            "tetrahedral": {
+                "jahn_teller_active": True,
+                "preferred_substitution": "dissociative",
+                "oxidation_state_penalties": {0: 2, 1: 0, 2: 1, 3: 3, 4: 5},
+                "notes": (
+                    "d9 Cu(II) is Jahn-Teller active in Td; geometry distorts "
+                    "toward D2d. Ligand exchange is faster than square planar."
+                ),
+            },
+            "square_planar": {
+                "jahn_teller_active": False,
+                "preferred_substitution": "associative",
+                "oxidation_state_penalties": {0: 3, 1: 1, 2: 0, 3: 2, 4: 4},
+                "notes": (
+                    "Preferred by Cu(II) with strong-field ligands. "
+                    "Kinetically more inert than tetrahedral coordination."
+                ),
+            },
+            "trigonal_bipyramidal": {
+                # Five-coordinate Cu(III/IV) does occur, but Cu(II) is generally favored.
+                "oxidation_state_penalties": {0: 4, 1: 2, 2: 0, 3: 1, 4: 3},
+            },
+            "disphenoidal": {
+                # Disphenoidal (seesaw-like) Cu often reflects a distorted Cu(II) manifold.
+                "oxidation_state_penalties": {0: 3, 1: 1, 2: 0, 3: 2, 4: 4},
+            },
+        },
+    ),
+    "Zn": MetalDefinition(
+        symbol="Zn",
+        atomic_number=30,
+        group=12,
+        expected_oxidation_states=[2],
+        covalent_radius=1.22,
+    ),
+    # Second-row transition metals
+    "Y": MetalDefinition(
+        symbol="Y",
+        atomic_number=39,
+        group=3,
+        expected_oxidation_states=[3],
+        covalent_radius=1.90,
+    ),
+    "Zr": MetalDefinition(
+        symbol="Zr",
+        atomic_number=40,
+        group=4,
+        expected_oxidation_states=[2, 3, 4],
+        covalent_radius=1.75,
+    ),
+    "Nb": MetalDefinition(
+        symbol="Nb",
+        atomic_number=41,
+        group=5,
+        expected_oxidation_states=[2, 3, 4, 5],
+        covalent_radius=1.64,
+    ),
+    "Mo": MetalDefinition(
+        symbol="Mo",
+        atomic_number=42,
+        group=6,
+        expected_oxidation_states=[-2, 0, 1, 2, 3, 4, 5, 6],
+        covalent_radius=1.54,
+    ),
+    "Tc": MetalDefinition(
+        symbol="Tc",
+        atomic_number=43,
+        group=7,
+        expected_oxidation_states=[0, 1, 2, 3, 4, 5, 6, 7],
+        covalent_radius=1.47,
+    ),
+    "Ru": MetalDefinition(
+        symbol="Ru",
+        atomic_number=44,
+        group=8,
+        expected_oxidation_states=[0, 2, 3, 4, 8],
+        covalent_radius=1.46,
+    ),
+    "Rh": MetalDefinition(
+        symbol="Rh",
+        atomic_number=45,
+        group=9,
+        expected_oxidation_states=[0, 1, 2, 3],
+        covalent_radius=1.42,
+    ),
+    "Pd": MetalDefinition(
+        symbol="Pd",
+        atomic_number=46,
+        group=10,
+        expected_oxidation_states=[0, 1, 2, 3, 4],
+        covalent_radius=1.39,
+    ),
+    "Ag": MetalDefinition(
+        symbol="Ag",
+        atomic_number=47,
+        group=11,
+        expected_oxidation_states=[1, 2, 3],
+        covalent_radius=1.45,
+    ),
+    "Cd": MetalDefinition(
+        symbol="Cd",
+        atomic_number=48,
+        group=12,
+        expected_oxidation_states=[2],
+        covalent_radius=1.44,
+    ),
+    # Lanthanides (limited support)
+    "La": MetalDefinition(
+        symbol="La",
+        atomic_number=57,
+        group=3,
+        expected_oxidation_states=[3],
+    ),
+    "Lu": MetalDefinition(
+        symbol="Lu",
+        atomic_number=71,
+        group=3,
+        expected_oxidation_states=[3],
+    ),
+    # Third-row transition metals
+    "Hf": MetalDefinition(
+        symbol="Hf",
+        atomic_number=72,
+        group=4,
+        expected_oxidation_states=[2, 3, 4],
+        covalent_radius=1.75,
+    ),
+    "Ta": MetalDefinition(
+        symbol="Ta",
+        atomic_number=73,
+        group=5,
+        expected_oxidation_states=[2, 3, 4, 5],
+        covalent_radius=1.70,
+    ),
+    "W": MetalDefinition(
+        symbol="W",
+        atomic_number=74,
+        group=6,
+        expected_oxidation_states=[-2, 0, 1, 2, 3, 4, 5, 6],
+        covalent_radius=1.62,
+    ),
+    "Re": MetalDefinition(
+        symbol="Re",
+        atomic_number=75,
+        group=7,
+        expected_oxidation_states=[-3, -1, 0, 1, 2, 3, 4, 5, 6, 7],
+        covalent_radius=1.51,
+    ),
+    "Os": MetalDefinition(
+        symbol="Os",
+        atomic_number=76,
+        group=8,
+        expected_oxidation_states=[0, 2, 3, 4, 8],
+        covalent_radius=1.44,
+    ),
+    "Ir": MetalDefinition(
+        symbol="Ir",
+        atomic_number=77,
+        group=9,
+        expected_oxidation_states=[0, 1, 2, 3, 4],
+        covalent_radius=1.41,
+    ),
+    "Pt": MetalDefinition(
+        symbol="Pt",
+        atomic_number=78,
+        group=10,
+        expected_oxidation_states=[0, 1, 2, 3, 4],
+        covalent_radius=1.36,
+    ),
+    "Au": MetalDefinition(
+        symbol="Au",
+        atomic_number=79,
+        group=11,
+        expected_oxidation_states=[1, 2, 3],
+        covalent_radius=1.36,
+    ),
+    "Hg": MetalDefinition(
+        symbol="Hg",
+        atomic_number=80,
+        group=12,
+        expected_oxidation_states=[2],
+        covalent_radius=1.32,
+    ),
+}
+
+
+def is_transition_metal(symbol: str) -> bool:
+    """Return whether an element symbol is treated as a transition metal by tmos.
+
+    An element is considered a transition metal if it has an entry in the
+    :data:`METALS` registry with a non-``None`` :attr:`~MetalDefinition.covalent_radius`.
+    This excludes main-group metals that are registered (Li, Mg, La, Lu) for
+    which no covalent radius is tabulated.
+
+    Parameters
+    ----------
+    symbol : str
+        Element symbol (case-sensitive, e.g. ``"Fe"``).
+
+    Returns
+    -------
+    bool
+        ``True`` when *symbol* is a transition metal supported by tmos.
+    """
+    return symbol in METALS and METALS[symbol].covalent_radius is not None
+
 
 bond_type_dict = {
     0: Chem.BondType.DATIVE,
@@ -65,117 +376,6 @@ bond_order_dict = {
     "DATIVE": 0,  # this is 1 in rdkit, but it should be zero to determine multiplicity
     "TRIPLE": 3,
 }
-transition_metal_covalent_radii = {
-    # Transition metals (first row)
-    "Sc": 1.70,
-    "Ti": 1.60,
-    "V": 1.53,
-    "Cr": 1.39,
-    "Mn": 1.39,
-    "Fe": 1.32,
-    "Co": 1.26,
-    "Ni": 1.24,
-    "Cu": 1.32,
-    "Zn": 1.22,
-    # Transition metals (second row)
-    "Y": 1.90,
-    "Zr": 1.75,
-    "Nb": 1.64,
-    "Mo": 1.54,
-    "Tc": 1.47,
-    "Ru": 1.46,
-    "Rh": 1.42,
-    "Pd": 1.39,
-    "Ag": 1.45,
-    "Cd": 1.44,
-    # Transition metals (third row)
-    "Hf": 1.75,
-    "Ta": 1.70,
-    "W": 1.62,
-    "Re": 1.51,
-    "Os": 1.44,
-    "Ir": 1.41,
-    "Pt": 1.36,
-    "Au": 1.36,
-    "Hg": 1.32,
-}
-
-expected_oxidation_states = {
-    "Li": [1],
-    "Mg": [2],
-    # Transition metals (first row)
-    "Sc": [3],
-    "Ti": [2, 3, 4],
-    "V": [2, 3, 4, 5],
-    "Cr": [0, 1, 2, 3, 4, 5, 6],
-    "Mn": [2, 3, 4, 5, 6],
-    "Fe": [2, 3, 4],
-    "Co": [0, 1, 2, 3],
-    "Ni": [0, 1, 2, 3],
-    "Cu": [1, 2, 3],
-    "Zn": [2],
-    # Transition metals (second row)
-    "Y": [3],
-    "Zr": [2, 3, 4],
-    "Nb": [2, 3, 4, 5],
-    "Mo": [0, 1, 2, 3, 4, 5, 6],
-    "Tc": [2, 3, 4, 5, 6],
-    "Ru": [2, 3, 4],
-    "Rh": [0, 1, 2, 3],
-    "Pd": [0, 1, 2, 3],
-    "Ag": [1, 2, 3],
-    "Cd": [2],
-    # Transition metals (third row)
-    "Hf": [2, 3, 4],
-    "Ta": [2, 3, 4, 5],
-    "W": [0, 1, 2, 3, 4, 5, 6],
-    "Re": [2, 3, 4, 5, 6],
-    "Os": [2, 3, 4],
-    "Ir": [0, 1, 2, 3],
-    "Pt": [0, 1, 2, 3],
-    "Au": [1, 2, 3],
-    "Hg": [2],
-}
-
-
-group_numbers = {
-    "Li": 1,
-    "Mg": 2,
-    # Transition metals (first row)
-    "Sc": 3,
-    "Ti": 4,
-    "V": 5,
-    "Cr": 6,
-    "Mn": 7,
-    "Fe": 8,
-    "Co": 9,
-    "Ni": 10,
-    "Cu": 11,
-    "Zn": 12,
-    # Transition metals (second row)
-    "Y": 3,
-    "Zr": 4,
-    "Nb": 5,
-    "Mo": 6,
-    "Tc": 7,
-    "Ru": 8,
-    "Rh": 9,
-    "Pd": 10,
-    "Ag": 11,
-    "Cd": 12,
-    # Transition metals (third row)
-    "Hf": 4,
-    "Ta": 5,
-    "W": 6,
-    "Re": 7,
-    "Os": 8,
-    "Ir": 9,
-    "Pt": 10,
-    "Au": 11,
-    "Hg": 12,
-}
-
-
 geometry_point_group = {
     2: {
         "C2v": "Bent",

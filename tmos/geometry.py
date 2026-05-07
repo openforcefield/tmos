@@ -1,3 +1,51 @@
+"""Coordination geometry detection for transition metal complexes.
+
+Given a central atom and its bonded neighbours in 3-D space, the functions in
+this module classify the local geometry (e.g. octahedral, tetrahedral,
+square-planar) and return a string label together with the coordination number.
+Four independent backends are provided so that the caller can trade accuracy
+against optional dependency requirements.
+
+Main function
+-------------
+:func:`get_geometry_from_mol`
+    Top-level entry point.  Accepts a fully-formed RDKit molecule and the index
+    of the central atom, isolates the first coordination sphere, and dispatches
+    to the chosen backend.  Returns a ``(geometry_label, n_bonds, local_mol)``
+    triple.  Called by :func:`~tmos.tmos.sanitize_complex` with
+    ``mode="angles"`` by default.
+
+Geometry methods and labels
+---------------------------
+``"angles"`` *(default, no extra dependency)*
+    Scores each candidate geometry by comparing the observed pairwise
+    ligand–metal–ligand angles against ideal templates in
+    :data:`~tmos.reference_values.ideal_angles`, averaged with an
+    orientation-tensor eigenvalue similarity against
+    :data:`~tmos.reference_values.coordinate_eigenvalues`.
+
+``"posym"`` *(optional: ``pip install posym``)*
+    Computes the Schoenflies point group with ``posym`` symmetry measures
+    and maps it to a geometry label via
+    :data:`~tmos.reference_values.geometry_point_group`.
+
+``"pymatgen"`` *(optional: ``pip install pymatgen``)*
+    Uses ``pymatgen``'s ``PointGroupAnalyzer`` to assign a Schoenflies
+    symbol, then maps it to a label via
+    :data:`~tmos.reference_values.geometry_point_group`.
+
+``"rylm"`` *(optional: install from GitHub)*
+    Computes rotational-invariant spherical-harmonic fingerprints and
+    finds the closest match in
+    :data:`~tmos.reference_values.steinhardt_order_parameters`.
+
+All backends return one of: ``"Linear"``, ``"Bent"``,
+``"Trigonal Planar"``, ``"Tetrahedral"``, ``"Square Planar"``,
+``"Trigonal Bipyramidal"``, ``"Square Pyramidal"``, ``"Octahedral"``,
+``"Ferrocene"``, ``"Monocoordinate"``, ``"Element"``, or
+``"Undetermined"`` when no template matches within tolerance.
+"""
+
 import numpy as np
 from rdkit import Chem
 from rdkit.Geometry import Point3D
@@ -793,6 +841,80 @@ def isolate_geometry_atoms(
 
     rdmol.AddConformer(conf, assignId=True)
     return rdmol
+
+
+def get_geometry_from_positions(
+    metal_pos: np.ndarray,
+    neighbor_positions: np.ndarray | list,
+    tol: float = 0.5,
+) -> GeometryResult:
+    """Determine coordination geometry from raw Cartesian positions.
+
+    Constructs a minimal RDKit molecule from the supplied coordinates and
+    delegates to :func:`get_geometry_from_angles`, which uses both pairwise
+    angle comparison and orientation-tensor eigenvalue similarity against ideal
+    templates.  Atom identity is irrelevant — only positions matter.
+
+    This is the entry point used by :func:`~tmos.tmos.sanitize_complex` when
+    haptic ligands are present: the atoms belonging to each haptic group are
+    replaced by a single centroid before calling this function, so that an η_n
+    group contributes one coordination direction rather than n separate bonds.
+
+    Parameters
+    ----------
+    metal_pos : array-like of shape (3,)
+        Cartesian position of the metal atom in Å.
+    neighbor_positions : array-like of shape (n, 3)
+        Cartesian positions of the effective coordination sites (real atoms
+        or virtual haptic centroids).
+    tol : float, default 0.5
+        Tolerance forwarded to :func:`get_geometry_from_angles`.
+
+    Returns
+    -------
+    GeometryResult
+        ``(geometry_label, n_neighbors)`` tuple.
+
+    Examples
+    --------
+    >>> # Trigonal planar example (120 degree angles)
+    >>> import numpy as np
+    >>> metal = np.array([0.0, 0.0, 0.0])
+    >>> import math
+    >>> neighbors = np.array([
+    ...     [math.cos(math.radians(0)),   math.sin(math.radians(0)),   0],
+    ...     [math.cos(math.radians(120)), math.sin(math.radians(120)), 0],
+    ...     [math.cos(math.radians(240)), math.sin(math.radians(240)), 0],
+    ... ])
+    >>> label, n = get_geometry_from_positions(metal, neighbors)
+    >>> label
+    'Trigonal Planar'
+    """
+    metal_pos = np.asarray(metal_pos, dtype=float)
+    neighbors = np.asarray(neighbor_positions, dtype=float)
+    if neighbors.ndim == 1:
+        neighbors = neighbors.reshape(1, 3)
+    n = len(neighbors)
+    if n == 0:
+        return "Element", 0
+    if n == 1:
+        return "Monocoordinate", 1
+
+    # Build a minimal all-carbon rdmol (element does not affect geometry scoring)
+    emol = Chem.EditableMol(Chem.Mol())
+    emol.AddAtom(Chem.Atom(6))  # metal placeholder at index 0
+    for i in range(n):
+        emol.AddAtom(Chem.Atom(6))
+        emol.AddBond(0, i + 1, Chem.BondType.SINGLE)
+    rdmol = emol.GetMol()
+
+    conf = Chem.Conformer(n + 1)
+    conf.SetAtomPosition(0, Point3D(*metal_pos))
+    for i, pos in enumerate(neighbors):
+        conf.SetAtomPosition(i + 1, Point3D(*pos))
+    rdmol.AddConformer(conf, assignId=True)
+
+    return get_geometry_from_angles(rdmol, central_idx=0, tol=tol), n
 
 
 def get_geometry_from_mol(

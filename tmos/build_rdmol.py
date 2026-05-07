@@ -1,9 +1,32 @@
-"""Functions for building RDKit molecules.
+"""Low-level utilities for constructing and interrogating RDKit molecules.
 
-Such functions include:
- - Utilities to import molecules from one package to RDKit
- - Determine the connectivity of the molecule from XYZ coordinates using RDKit or OpenBabel
- - Determining the bond orders of a molecule using RDKit, OpenBabel, or MDAnalysis
+This module provides three groups of functionality that underpin the bond-order
+and charge-assignment pipeline in ``tmos``:
+
+1. **Atom assessment** — valence-balance heuristics that identify atoms with
+   unsatisfied valence or non-zero formal charge, and aggregate them into
+   per-molecule diagnostics.
+2. **Molecule construction** — routines that build RDKit molecules from external
+   representations (QCElemental objects, raw symbols + coordinates) or that
+   copy/synchronise atom and bond properties between two molecules.
+3. **Connectivity and bond-order determination** — a suite of backends
+   (custom covalent-radius heuristic, RDKit, OpenBabel) for inferring bonds from
+   3-D coordinates, plus higher-level wrappers that perceive full bond orders
+   from an already-connected molecule.
+
+Main functions
+--------------
+:func:`xyz_to_rdkit`
+    Convenience wrapper: builds an RDKit molecule directly from element symbols
+    and a NumPy coordinate array, running connectivity detection internally.
+:func:`qcelemental_to_rdkit`
+    Converts a QCElemental-like molecule (with ``symbols``, ``geometry``, and
+    optional ``connectivity``) into an RDKit molecule.
+:func:`determine_bonds`
+    Top-level bond-order perception dispatcher (imported from
+    :mod:`tmos._rdkit_bond_typing`).  Accepts a connectivity-only RDKit
+    molecule and fills in bond orders using the chosen backend
+    (``"openbabel"``, ``"rdkit"``, or ``"hybrid"``).
 
 """
 
@@ -36,10 +59,15 @@ from .graph_mapping import (
 from .reference_values import (
     bond_order_dict,
     bond_type_dict,
-    transition_metal_covalent_radii,
-    METALS_NUM,
+    is_transition_metal,
+    METALS,
 )
 from tmos._rdkit_bond_typing import determine_bonds, molecular_penalty
+
+# Frozenset of atomic numbers treated as metal centers — derived from the METALS registry.
+_METALS_ATOMIC_NUMS: frozenset[int] = frozenset(
+    m.atomic_number for m in METALS.values()
+)
 
 __all__: list[str] = [
     "determine_bonds",
@@ -157,6 +185,12 @@ def assess_atoms(
 ) -> tuple[int | float, int, dict[int, ChargedAtomInfo]]:
     """Assess atom-wise charge state and unsatisfied valence indicators.
 
+    Note: `assess_atoms`` derives charge from valence balance and is therefore
+    unreliable for post-sanitized aromatic systems (e.g. Cp⁻), where RDKit
+    aromaticity satisfies every atom's valence even though the ring carries
+    a formal charge of −1.  For such molecules use
+    ``rdkit.Chem.GetFormalCharge`` instead.
+
     Parameters
     ----------
     mol : rdkit.Chem.rdchem.Mol
@@ -243,7 +277,7 @@ def update_formal_charges(mol: Mol) -> None:
     None
     """
     for atm in mol.GetAtoms():
-        if atm.GetAtomicNum() in METALS_NUM:
+        if atm.GetAtomicNum() in _METALS_ATOMIC_NUMS:
             continue
         charge = get_atom_charge(atm)
         if np.finfo(float).eps < abs(charge) < 1 - np.finfo(float).eps:
@@ -398,7 +432,6 @@ def xyz_to_rdkit(
     ignore_scale : bool, default=False
         If True avoid an error when "H" is present and the minimum atomic distance is not between
         0.8 Å and 1.5 Å.
-
     Returns
     -------
     rdkit.Chem.Mol
@@ -446,7 +479,9 @@ def xyz_to_rdkit(
     mol.UpdatePropertyCache(strict=False)
     mol = mol.GetMol()
     mol = determine_connectivity(
-        mol, distance_tolerance=distance_tolerance, method=method
+        mol,
+        distance_tolerance=distance_tolerance,
+        method=method,
     )
     mol.UpdatePropertyCache(strict=False)
     try:
@@ -487,7 +522,6 @@ def determine_connectivity(
 
     distance_tolerance : float, default=0.2
         Additional tolerance for bond distance cutoffs (Å).
-
     Returns
     -------
     rdkit.Chem.Mol
@@ -510,7 +544,8 @@ def determine_connectivity(
         return _determine_connectivity_rdkit(rdkit_mol, distance_tolerance)
     elif method == "custom":
         return _determine_connectivity_custom(
-            rdkit_mol, max_distance_tolerance=distance_tolerance
+            rdkit_mol,
+            max_distance_tolerance=distance_tolerance,
         )
     else:
         raise ValueError(
@@ -572,29 +607,12 @@ def _get_covalent_radius(symbol: str, fallback_radius: float = 1.5) -> float:
         # periodictable stores covalent radius in pm, convert to Angstroms
         if hasattr(element, "covalent_radius") and element.covalent_radius is not None:
             return element.covalent_radius
-        elif _is_transition_metal(symbol):
-            return transition_metal_covalent_radii.get(symbol, fallback_radius)
+        elif symbol in METALS and METALS[symbol].covalent_radius is not None:
+            return METALS[symbol].covalent_radius
         else:
             return fallback_radius
     except AttributeError:
         return fallback_radius
-
-
-def _is_transition_metal(symbol: str) -> bool:
-    """Check whether an element is treated as a transition metal.
-
-    Parameters
-    ----------
-    symbol : str
-        Element symbol.
-
-    Returns
-    -------
-    bool
-        ``True`` when symbol is in transition-metal radius table.
-    """
-
-    return symbol in transition_metal_covalent_radii
 
 
 # Atomic numbers that commonly carry +1 formal charge in organic molecules.
@@ -608,85 +626,103 @@ _CATIONIC_ATOMIC_NUMS: frozenset[int] = frozenset(
     }
 )
 
+# Atomic numbers of elements that carry accessible lone pairs and are
+# chemically meaningful metal donor atoms.  The TM-aware cap relaxation
+# (−1 on degree when forming a metal bond) is restricted to these elements
+# so that saturated sp3 carbons (degree=4, no lone pair) are not spuriously
+# allowed to bond to a metal centre.
+_LONE_PAIR_DONOR_ATOMIC_NUMS: frozenset[int] = frozenset(
+    {
+        7,  # N  — amine, ammonia, nitrile …
+        8,  # O  — water, hydroxyl, ether …
+        9,  # F  — fluoride
+        15,  # P  — phosphine, phosphido …
+        16,  # S  — thioether, thiol …
+        17,  # Cl — chloride
+        35,  # Br — bromide
+        53,  # I  — iodide
+    }
+)
 
-def _correct_sulfonate_phosphate_interaction(
-    mol: Mol,
-    distances: np.ndarray,
-    r_cut: float = 3.0,
-    dist_frac: float = 0.05,
-) -> list[int]:
-    """Return candidate atom indices to block from metal bonding.
 
-    The heuristic blocks atoms when neighboring electronegative atoms are
-    substantially closer to the metal center.
-
-    Parameters
-    ----------
-    mol : rdkit.Chem.Mol
-        Molecule to evaluate.
-    distances : numpy.ndarray
-        Pairwise distance matrix.
-    r_cut : float, default=3.0
-        Distance cutoff (Å) for local metal-neighbor consideration.
-    dist_frac : float, default=0.05
-        Relative closeness threshold for blocking a candidate atom.
-
-    Returns
-    -------
-    list of int
-        Atom indices that should not bond to the metal center.
-    """
-
-    metal_indices = [
-        a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
-    ]
-    electronegative_sym: list[str] = ["O", "N", "C"]
-    central_sym: list[str] = [
-        "S",
-        "P",
-        "C",
-        "H",
-        "N",
-    ]  # Ensure bonds aren't mistakenly made with these
-
-    possible_central_atoms = set()
-    possible_elec_neg_idx = set()
-    for metal_idx in metal_indices:
-        for i, atm in enumerate(mol.GetAtoms()):
-            if i != metal_idx and distances[metal_idx, i] <= r_cut:
-                if atm.GetSymbol() in electronegative_sym:
-                    possible_elec_neg_idx.add(i)
-                if atm.GetSymbol() in central_sym:
-                    possible_central_atoms.add(atm)
-
-    block_bond_idx = []
-    for atm in possible_central_atoms:
-        # Block hydrogens that are already bonded to something
-        if atm.GetSymbol() == "H" and atm.GetDegree() > 0:
-            block_bond_idx.append(atm.GetIdx())
-            continue
-
-        # Find closest metal to this atom
-        metal_idx = min(metal_indices, key=lambda m: distances[m, atm.GetIdx()])
-        d_center = distances[metal_idx, atm.GetIdx()]
-
-        # Get distances from metal to electronegative neighbors
-        d_connections = np.array(
-            [
-                distances[metal_idx, a.GetIdx()]
-                for b in atm.GetBonds()
-                for a in [b.GetEndAtom(), b.GetBeginAtom()]
-                if a.GetIdx() != atm.GetIdx() and a.GetIdx() in possible_elec_neg_idx
-            ]
-        )
-
-        if (
-            len(d_connections) > 0
-            and np.max((d_center - d_connections) / d_center) > dist_frac
-        ):
-            block_bond_idx.append(atm.GetIdx())
-
-    return block_bond_idx
+# def _correct_sulfonate_phosphate_interaction(
+#    mol: Mol,
+#    distances: np.ndarray,
+#    r_cut: float = 3.0,
+#    dist_frac: float = 0.05,
+# ) -> list[int]:
+#    """Return candidate atom indices to block from metal bonding.
+#
+#    The heuristic blocks atoms when neighboring electronegative atoms are
+#    substantially closer to the metal center.
+#
+#    Parameters
+#    ----------
+#    mol : rdkit.Chem.Mol
+#        Molecule to evaluate.
+#    distances : numpy.ndarray
+#        Pairwise distance matrix.
+#    r_cut : float, default=3.0
+#        Distance cutoff (Å) for local metal-neighbor consideration.
+#    dist_frac : float, default=0.05
+#        Relative closeness threshold for blocking a candidate atom.
+#
+#    Returns
+#    -------
+#    list of int
+#        Atom indices that should not bond to the metal center.
+#    """
+#
+#    metal_indices = [
+#        a.GetIdx() for a in mol.GetAtoms() if is_transition_metal(a.GetSymbol())
+#    ]
+#    electronegative_sym: list[str] = ["O", "N"]
+#    central_sym: list[str] = [
+#        "S",
+#        "P",
+#        "C",
+#        "H",
+#        "N",
+#    ]  # Ensure bonds aren't mistakenly made with these
+#
+#    possible_central_atoms = set()
+#    possible_elec_neg_idx = set()
+#    for metal_idx in metal_indices:
+#        for i, atm in enumerate(mol.GetAtoms()):
+#            if i != metal_idx and distances[metal_idx, i] <= r_cut:
+#                if atm.GetSymbol() in electronegative_sym:
+#                    possible_elec_neg_idx.add(i)
+#                if atm.GetSymbol() in central_sym:
+#                    possible_central_atoms.add(atm)
+#
+#    block_bond_idx = []
+#    for atm in possible_central_atoms:
+#        # Block hydrogens that are already bonded to something
+#        if atm.GetSymbol() == "H" and atm.GetDegree() > 0:
+#            block_bond_idx.append(atm.GetIdx())
+#            continue
+#
+#        # Find closest metal to this atom
+#        metal_idx = min(metal_indices, key=lambda m: distances[m, atm.GetIdx()])
+#        d_center = distances[metal_idx, atm.GetIdx()]
+#
+#        # Get distances from metal to electronegative neighbors
+#        d_connections = np.array(
+#            [
+#                distances[metal_idx, a.GetIdx()]
+#                for b in atm.GetBonds()
+#                for a in [b.GetEndAtom(), b.GetBeginAtom()]
+#                if a.GetIdx() != atm.GetIdx() and a.GetIdx() in possible_elec_neg_idx
+#            ]
+#        )
+#
+#        if (
+#            len(d_connections) > 0
+#            and np.max((d_center - d_connections) / d_center) > dist_frac
+#        ):
+#            block_bond_idx.append(atm.GetIdx())
+#
+#    return block_bond_idx
 
 
 def _max_valence_for_connectivity(
@@ -710,7 +746,7 @@ def _max_valence_for_connectivity(
     int
         Maximum number of bonds the atom may form during connectivity detection.
     """
-    if _is_transition_metal(symbol):
+    if is_transition_metal(symbol):
         return 14  # effectively uncapped for TMs
     vlist = [v for v in pt.GetValenceList(atomic_num) if v != -1]
     base = max(vlist) if vlist else 12
@@ -742,7 +778,7 @@ def _is_valence_satisfied(degree: int, atomic_num: int, symbol: str) -> bool:
     bool
         ``True`` when degree is already a valid closed-shell valence count.
     """
-    if _is_transition_metal(symbol):
+    if is_transition_metal(symbol):
         return False
     vlist = [v for v in pt.GetValenceList(atomic_num) if v != -1]
     return degree in vlist
@@ -762,7 +798,7 @@ def _connectivity_distance_window(
     """
     r_i = _get_covalent_radius(symbol_i)
     r_j = _get_covalent_radius(symbol_j)
-    one_is_tm = _is_transition_metal(symbol_i) or _is_transition_metal(symbol_j)
+    one_is_tm = is_transition_metal(symbol_i) or is_transition_metal(symbol_j)
     factor = 2 if one_is_tm else 1
 
     base = r_i + r_j
@@ -800,6 +836,87 @@ def _determine_connectivity_rdkit(mol: Mol, distance_tolerance: float = 0.2) -> 
     return mol
 
 
+def _prune_spurious_metal_bonds(mol: Mol, tmc_idx: int, max_angle: float = 85) -> Mol:
+    """Remove spurious metal–ligand bonds based on an angle criterion.
+
+    For each pair of metal-bonded atoms (A1, A2) that are also bonded to each
+    other, compute the angles ∠(M–A1–A2) and ∠(M–A2–A1).  If either angle
+    exceeds 90°, the bond from the metal to the *farther* atom is removed.
+
+    This correctly handles:
+    - Spurious bonds: metal lies beyond one end of a covalent A1–A2 bond
+      (e.g. Fe connected to a ring carbon that is not a true donor) — the
+      distant atom gives an obtuse angle.
+    - True haptic bonds: metal hovers above the midpoint of A1–A2, so both
+      angles are acute (< 90°) and neither bond is removed.
+
+    Only the M–Ax bond is removed; the A1–A2 covalent bond is preserved.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        Molecule with connectivity assigned.
+    tmc_idx : int
+        Atom index of the transition metal in *mol*.
+    max_angle : float, default=90
+        Maximum angle below which a bond can be considered haptic
+
+    Returns
+    -------
+    rdkit.Chem.Mol
+        Molecule with spurious metal bonds removed.
+    """
+    conf = mol.GetConformer()
+    pos_m = np.array(conf.GetAtomPosition(tmc_idx))
+
+    metal_nbrs = [
+        b.GetOtherAtomIdx(tmc_idx) for b in mol.GetAtomWithIdx(tmc_idx).GetBonds()
+    ]
+    to_remove = set()
+
+    for i, a1 in enumerate(metal_nbrs):
+        for a2 in metal_nbrs[i + 1 :]:
+            if mol.GetBondBetweenAtoms(a1, a2) is None:
+                continue  # not mutually bonded — not relevant
+            pos_a1 = np.array(conf.GetAtomPosition(a1))
+            pos_a2 = np.array(conf.GetAtomPosition(a2))
+            d_m_a1 = np.linalg.norm(pos_m - pos_a1)
+            d_m_a2 = np.linalg.norm(pos_m - pos_a2)
+
+            # Angle at A1: M-A1-A2
+            v1m = pos_m - pos_a1
+            v12 = pos_a2 - pos_a1
+            cos1 = np.dot(v1m, v12) / (np.linalg.norm(v1m) * np.linalg.norm(v12))
+            angle_at_a1 = np.degrees(np.arccos(np.clip(cos1, -1, 1)))
+
+            # Angle at A2: M-A2-A1
+            v2m = pos_m - pos_a2
+            v21 = pos_a1 - pos_a2
+            cos2 = np.dot(v2m, v21) / (np.linalg.norm(v2m) * np.linalg.norm(v21))
+            angle_at_a2 = np.degrees(np.arccos(np.clip(cos2, -1, 1)))
+
+            if angle_at_a1 > max_angle or angle_at_a2 > max_angle:
+                # Remove bond to the farther atom
+                farther = a2 if d_m_a2 >= d_m_a1 else a1
+                to_remove.add(farther)
+                logger.debug(
+                    "Pruning spurious M–%s bond (d=%.3f Å): "
+                    "∠(M–A1–A2)=%.1f°, ∠(M–A2–A1)=%.1f°",
+                    farther,
+                    max(d_m_a1, d_m_a2),
+                    angle_at_a1,
+                    angle_at_a2,
+                )
+
+    if to_remove:
+        rw = Chem.RWMol(mol)
+        for idx in to_remove:
+            rw.RemoveBond(tmc_idx, idx)
+        return rw.GetMol()
+
+    return mol
+
+
 def _determine_connectivity_custom(
     rdkit_mol: Mol,
     max_distance_tolerance: float = 0.2,
@@ -825,7 +942,6 @@ def _determine_connectivity_custom(
         Maximum extra distance (Å) above radius sum for bond formation.
     min_distance_tolerance : float, default=0.45
         Minimum distance (Å) below which atoms are considered too close.
-
     Returns
     -------
     rdkit.Chem.Mol
@@ -868,7 +984,7 @@ def _determine_connectivity_custom(
     )
     distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
     metal_indices = [
-        a.GetIdx() for a in mol.GetAtoms() if _is_transition_metal(a.GetSymbol())
+        a.GetIdx() for a in mol.GetAtoms() if is_transition_metal(a.GetSymbol())
     ]
     metal_idx = metal_indices[0] if metal_indices else None
 
@@ -903,8 +1019,30 @@ def _determine_connectivity_custom(
     for d, i, j in candidate_pairs:
         if mol.GetBondBetweenAtoms(i, j) is not None:
             continue
+        # Hydrogen must bond only to heavy atoms (atomic_num > 1).
+        if atomic_nums[i] == 1 and atomic_nums[j] == 1:
+            continue
+
+        i_is_tm = is_transition_metal(symbols[i])
+        j_is_tm = is_transition_metal(symbols[j])
+        one_is_tm = i_is_tm or j_is_tm
+
+        # When this candidate is a TM-involving bond, lone-pair donor atoms
+        # (O, N, S, P, halogens) get one free slot beyond their neutral max
+        # valence for dative coordination.  Carbon and other non-donor atoms
+        # are excluded: a saturated sp3 carbon has no lone pair and must not
+        # form a spurious extra bond to the metal.
+        i_is_lp_donor = atomic_nums[i] in _LONE_PAIR_DONOR_ATOMIC_NUMS
+        j_is_lp_donor = atomic_nums[j] in _LONE_PAIR_DONOR_ATOMIC_NUMS
+        i_degree_for_cap = degrees[i] - (
+            1 if one_is_tm and not i_is_tm and i_is_lp_donor else 0
+        )
+        j_degree_for_cap = degrees[j] - (
+            1 if one_is_tm and not j_is_tm and j_is_lp_donor else 0
+        )
+
         # Rule 1 — hard cap: neither atom may exceed its maximum valence.
-        if degrees[i] >= max_valences[i] or degrees[j] >= max_valences[j]:
+        if i_degree_for_cap >= max_valences[i] or j_degree_for_cap >= max_valences[j]:
             continue
 
         # Rule 2 — soft satisfied skip: if *both* endpoints already sit at
@@ -934,9 +1072,10 @@ def _determine_connectivity_custom(
         degrees[j] += 1
 
     if metal_idx is not None:
-        for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
-            if mol.GetBondBetweenAtoms(metal_idx, idx) is not None:
-                mol.RemoveBond(metal_idx, idx)
+        # for idx in _correct_sulfonate_phosphate_interaction(mol, distances):
+        #    if mol.GetBondBetweenAtoms(metal_idx, idx) is not None:
+        #        mol.RemoveBond(metal_idx, idx)
+        return _prune_spurious_metal_bonds(mol.GetMol(), metal_idx)
 
     return mol.GetMol()
 

@@ -4,7 +4,7 @@ import os
 import sys
 import traceback
 from collections import defaultdict
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 import json
 import re
 from contextlib import contextmanager
@@ -138,6 +138,57 @@ def save_to_json(result: dict[str, object], filename: str, indent: int = 4) -> N
 
     with open(filename, "w") as f:
         json.dump(remove_rdmol(result), f, indent=indent)
+
+
+def save_complex_states_to_json(
+    states: Sequence[object],
+    filename: str,
+    indent: int = 2,
+    include_graph: bool = True,
+    coordinate_units: str = "angstrom",
+    schema_version: int = 1,
+) -> None:
+    """Save serialized ``ComplexState`` entries to JSON.
+
+    Parameters
+    ----------
+    states : sequence of object
+        Objects exposing a ``to_dict`` method compatible with
+        ``ComplexState.to_dict``.
+    filename : str
+        Output JSON path.
+    indent : int, default=2
+        JSON indentation level.
+    include_graph : bool, default=True
+        Include serialized atom/bond/coordinate graph payload when available.
+    coordinate_units : str, default="angstrom"
+        Coordinate units label written into the serialized graph payload.
+    schema_version : int, default=1
+        Serialization schema version passed through to each state serializer.
+
+    Returns
+    -------
+    None
+    """
+
+    serialized_states: list[dict[str, object]] = []
+    for idx, state in enumerate(states):
+        to_dict = getattr(state, "to_dict", None)
+        if to_dict is None or not callable(to_dict):
+            raise TypeError(f"states[{idx}] must provide a callable to_dict method")
+        payload = to_dict(
+            include_graph=include_graph,
+            coordinate_units=coordinate_units,
+            schema_version=schema_version,
+        )
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"states[{idx}].to_dict(...) must return a dictionary payload"
+            )
+        serialized_states.append(payload)
+
+    with open(filename, "w") as f:
+        json.dump(serialized_states, f, indent=indent)
 
 
 def first_traceback(keyword: str = "During handling of the above exception") -> str:
