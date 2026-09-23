@@ -4,7 +4,7 @@ channels:
 
 dependencies:
   # Base
-  - python=3.11
+  - python<=3.14
   - pip
 
   # Core runtime (mirrors pyproject.toml dependencies)
@@ -18,7 +18,6 @@ dependencies:
 
   # Optional — geometry (pip install "tmos[geometry]")
   - pymatgen
-  - posym
 
   # Optional — visualization (pip install "tmos[viz]")
   - py3Dmol
@@ -35,3 +34,4 @@ dependencies:
     - git+https://github.com/chrisiacovella/rylm.git
     # codecov CLI for coverage upload in CI
     - codecov-cli
+    - posym

@@ -2872,11 +2872,11 @@ def _secondary_cleanup_stretch_cutoff(
     oxygen_j_excl: int,
     heavy_i_excl: int,
     heavy_j_excl: int,
+    stretch_cutoff: float = 0.2,
+    oxygen_rich_ps_bridge: bool = False,
+    hypercoord_pp_bridge: bool = False,
 ) -> tuple[float, bool, bool]:
     """Return adaptive stretch cutoff and bridge flags for one bond candidate."""
-    stretch_cutoff = 0.10
-    oxygen_rich_ps_bridge = False
-    hypercoord_pp_bridge = False
 
     if z_i == 6 and z_j == 6:
         stretch_cutoff = 0.16

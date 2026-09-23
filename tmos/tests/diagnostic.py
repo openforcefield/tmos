@@ -119,16 +119,12 @@ def _pair_diag(actual_mol: Mol, i: int, j: int) -> EdgeThresholdDiagnostic:
     max_j = build_rdmol._max_valence_for_connectivity(atom_j.GetAtomicNum(), sym_j)  # type: ignore[attr-defined]
     rule1 = degree_i >= max_i or degree_j >= max_j
 
-    i_ring_n_sat = atom_i.GetAtomicNum() == 7 and degree_i == 2 and atom_i.IsInRing()
-    j_ring_n_sat = atom_j.GetAtomicNum() == 7 and degree_j == 2 and atom_j.IsInRing()
-    i_satisfied = (
-        build_rdmol._is_valence_satisfied(degree_i, atom_i.GetAtomicNum(), sym_i)
-        or i_ring_n_sat
-    )  # type: ignore[attr-defined]
-    j_satisfied = (
-        build_rdmol._is_valence_satisfied(degree_j, atom_j.GetAtomicNum(), sym_j)
-        or j_ring_n_sat
-    )  # type: ignore[attr-defined]
+    i_satisfied = build_rdmol._is_valence_satisfied(  # type: ignore[attr-defined]
+        degree_i, atom_i.GetAtomicNum(), sym_i
+    )
+    j_satisfied = build_rdmol._is_valence_satisfied(  # type: ignore[attr-defined]
+        degree_j, atom_j.GetAtomicNum(), sym_j
+    )
     rule2 = bool(i_satisfied and j_satisfied)
 
     return {

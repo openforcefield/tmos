@@ -954,8 +954,8 @@ def _determine_connectivity_custom(
 
     Notes
     -----
-        - Existing bonds from upstream methods (RDKit/OpenBabel) are preserved as
-            the starting graph and count toward valence limits.
+    - Existing bonds from upstream methods (RDKit/OpenBabel) are preserved as
+      the starting graph and count toward valence limits.
     - Transition metals are handled with a larger bonding threshold (scaled by 1.3)
       and are exempt from the valence-based pruning rules below.
     - **Rule 1 — hard cap**: a bond is rejected if it would bring either endpoint's
@@ -1050,20 +1050,8 @@ def _determine_connectivity_custom(
         # spurious (e.g. P-P in a phosphate cage where each P already has
         # three O bonds and degree=3 is valid for P).  Transition-metal
         # atoms are never considered satisfied so TM bonds are unaffected.
-        i_ring_n_sat = (
-            atomic_nums[i] == 7 and degrees[i] == 2 and mol.GetAtomWithIdx(i).IsInRing()
-        )
-        j_ring_n_sat = (
-            atomic_nums[j] == 7 and degrees[j] == 2 and mol.GetAtomWithIdx(j).IsInRing()
-        )
-        i_satisfied = (
-            _is_valence_satisfied(degrees[i], atomic_nums[i], symbols[i])
-            or i_ring_n_sat
-        )
-        j_satisfied = (
-            _is_valence_satisfied(degrees[j], atomic_nums[j], symbols[j])
-            or j_ring_n_sat
-        )
+        i_satisfied = _is_valence_satisfied(degrees[i], atomic_nums[i], symbols[i])
+        j_satisfied = _is_valence_satisfied(degrees[j], atomic_nums[j], symbols[j])
         if i_satisfied and j_satisfied:
             continue
 
