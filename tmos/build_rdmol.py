@@ -60,6 +60,7 @@ from .reference_values import (
     bond_order_dict,
     bond_type_dict,
     is_transition_metal,
+    load_bond_boundaries,
     METALS,
 )
 from tmos._rdkit_bond_typing import determine_bonds, molecular_penalty
@@ -493,6 +494,7 @@ def xyz_to_rdkit(
     except Exception:  # Doesn't always work for metal complexes
         pass
 
+    # Chem.AssignStereochemistry(mol, force=True)
     return mol
 
 
@@ -1001,15 +1003,34 @@ def _determine_connectivity_custom(
     # principle without relying on atom-index traversal order.
     n = mol.GetNumAtoms()
     candidate_pairs: list[tuple[float, int, int]] = []
+
+    # Load bond boundaries once for this connectivity run
+    use_boundaries = (
+        max_distance_tolerance == 0.45
+        and min_distance_tolerance == 0.2  # defaults of function
+    )
+    bond_boundaries = load_bond_boundaries() if use_boundaries else None
+
     for i in range(n):
         for j in range(i + 1, n):
-            min_bond_threshold, max_bond_threshold = _connectivity_distance_window(
-                symbols[i],
-                symbols[j],
-                max_distance_tolerance=max_distance_tolerance,
-                min_distance_tolerance=min_distance_tolerance,
-            )
             d = distances[i, j]
+            sym_sorted = tuple(sorted([symbols[i], symbols[j]]))
+            bond_type = f"{sym_sorted[0]}-{sym_sorted[1]}"
+            if (
+                use_boundaries
+                and bond_boundaries is not None
+                and bond_type in bond_boundaries
+            ):
+                min_bond_threshold = bond_boundaries[bond_type]["min"]
+                max_bond_threshold = bond_boundaries[bond_type]["max"]
+            else:
+                min_bond_threshold, max_bond_threshold = _connectivity_distance_window(
+                    symbols[i],
+                    symbols[j],
+                    max_distance_tolerance=max_distance_tolerance,
+                    min_distance_tolerance=min_distance_tolerance,
+                )
+
             if min_bond_threshold < d < max_bond_threshold:
                 candidate_pairs.append((d, i, j))
     # Short bonds first: when an atom's degree cap is hit, closest neighbours

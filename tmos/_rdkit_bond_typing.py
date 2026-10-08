@@ -22,6 +22,7 @@ from loguru import logger
 from rdkit import Chem
 from rdkit.Chem.rdDetermineBonds import DetermineBondOrders
 from rdkit.Chem.rdchem import Atom, Bond, Mol
+
 from .utils import sync_atom_int_props_by_mapping
 
 try:
@@ -30,6 +31,7 @@ except ImportError:
     ob = None
 
 import tmos
+from tmos.reference_values import load_bond_boundaries
 
 # ---------------------------------------------------------------------------
 # Stage-timing profiling state (module-level accumulators)
@@ -503,7 +505,6 @@ def _atom_penalty(atom: Atom, formal_charge: int | None = None) -> int:
     formal_charge : int or None, default=None
         Formal charge to use.  When ``None``, uses ``atom.GetFormalCharge()``.
 
-    Returns
     -------
     int
         Penalty value where smaller is preferred.
@@ -2821,133 +2822,73 @@ def _score_structure_for_cleanup(
     return _charge_objective(probe)
 
 
-def _secondary_cleanup_features(
+def _collect_secondary_stretched_candidates(
     mol: Mol,
-) -> tuple[dict[int, int], dict[int, int], dict[int, bool]]:
-    """Return per-atom features used by secondary overvalence cleanup.
+    conf: Chem.Conformer | None,
+    fraction_bond_range: float = 0.1,
+) -> list[tuple[float, int, int]]:
+    """Collect stretched heavy-atom single-bond candidates for secondary cleanup.
+
+    Examines all heavy-atom single bonds and flags those falling in the bottom ``fraction_bond_range``
+    or top ``fraction_bond_range`` of the expected distance range from bond_boundaries.json. Bonds not
+    present in the table are skipped.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        Molecule with explicit 3D coordinates.
+    conf : rdkit.Chem.Conformer or None
+        Conformer containing atom coordinates. Returns empty list if None.
+    fraction_bond_range : float, default=0.1
+        Fraction of bond distance range that defines outlier thresholds.
+        Bottom outliers: distance < (min_dist + fraction_check * range)
+        Top outliers: distance > (max_dist - fraction_check * range)
 
     Returns
     -------
-    tuple
-        ``(heavy_degree, oxygen_neighbor_total, has_hetero_neighbor)`` maps.
+    list of tuple
+        Each tuple is (stretch, idx_a, idx_b, distance) where:
+        - stretch: float = observed_distance - sum_of_covalent_radii
+        - idx_a, idx_b: int = atom indices
+        - distance: float = observed bond distance in Ångströms
     """
-    heavy_degree: dict[int, int] = {}
-    oxygen_total: dict[int, int] = {}
-    has_hetero_neighbor: dict[int, bool] = {}
-
-    for atom in mol.GetAtoms():
-        idx = atom.GetIdx()
-        nbrs = list(atom.GetNeighbors())
-        heavy_degree[idx] = sum(1 for nbr in nbrs if nbr.GetAtomicNum() != 1)
-        oxygen_total[idx] = sum(1 for nbr in nbrs if nbr.GetAtomicNum() == 8)
-        has_hetero_neighbor[idx] = any(nbr.GetAtomicNum() not in (1, 6) for nbr in nbrs)
-
-    return heavy_degree, oxygen_total, has_hetero_neighbor
-
-
-def _is_secondary_cleanup_candidate(ai: Atom, aj: Atom, bond: Bond) -> bool:
-    """Return ``True`` if this heavy-atom single bond is eligible for pruning."""
-    if ai.GetAtomicNum() == 1 or aj.GetAtomicNum() == 1:
-        return False
-    if bond.GetBondType() != Chem.BondType.SINGLE:
-        return False
-
-    z_i = ai.GetAtomicNum()
-    z_j = aj.GetAtomicNum()
-
-    # Preserve most ring bonds unless chemistry suggests a likely closure artefact.
-    if bond.IsInRing() and not ({z_i, z_j} & {15, 16}) and not (z_i == 6 and z_j == 6):
-        return False
-
-    return True
-
-
-def _secondary_cleanup_stretch_cutoff(
-    z_i: int,
-    z_j: int,
-    bond_in_ring: bool,
-    hetero_nbr_i: bool,
-    hetero_nbr_j: bool,
-    oxygen_i_excl: int,
-    oxygen_j_excl: int,
-    heavy_i_excl: int,
-    heavy_j_excl: int,
-    stretch_cutoff: float = 0.2,
-    oxygen_rich_ps_bridge: bool = False,
-    hypercoord_pp_bridge: bool = False,
-) -> tuple[float, bool, bool]:
-    """Return adaptive stretch cutoff and bridge flags for one bond candidate."""
-
-    if z_i == 6 and z_j == 6:
-        stretch_cutoff = 0.16
-        if bond_in_ring and hetero_nbr_i and hetero_nbr_j:
-            stretch_cutoff = 0.12
-
-    if {z_i, z_j}.issubset({15, 16}) and oxygen_i_excl >= 2 and oxygen_j_excl >= 2:
-        oxygen_rich_ps_bridge = True
-        stretch_cutoff = 0.00
-
-    if z_i == 15 and z_j == 15 and heavy_i_excl >= 3 and heavy_j_excl >= 3:
-        hypercoord_pp_bridge = True
-        stretch_cutoff = min(stretch_cutoff, 0.03)
-
-    return stretch_cutoff, oxygen_rich_ps_bridge, hypercoord_pp_bridge
-
-
-def _collect_secondary_stretched_candidates(
-    mol: Mol,
-    heavy_degree: dict[int, int],
-    oxygen_total: dict[int, int],
-    has_hetero_nbr: dict[int, bool],
-    conf,
-) -> list[tuple[float, int, int, float, bool, bool]]:
-    """Collect stretched heavy-atom single-bond candidates for secondary cleanup."""
-    stretched: list[tuple[float, int, int, float, bool, bool]] = []
     if conf is None:
-        return stretched
+        return []
+
+    stretched: list[tuple[float, int, int]] = []
+    bond_boundaries = load_bond_boundaries()
+
+    # Compute heavy degree for each atom
+    heavy_degree = {
+        atom.GetIdx(): sum(1 for nbr in atom.GetNeighbors() if nbr.GetAtomicNum() != 1)
+        for atom in mol.GetAtoms()
+    }
 
     for bond in mol.GetBonds():
-        i = bond.GetBeginAtomIdx()
-        j = bond.GetEndAtomIdx()
-        ai = mol.GetAtomWithIdx(i)
-        aj = mol.GetAtomWithIdx(j)
-        if not _is_secondary_cleanup_candidate(ai, aj, bond):
-            continue
+        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
 
+        # Early exit if either atom has too few heavy neighbors
         if heavy_degree[i] < 2 or heavy_degree[j] < 2:
             continue
 
-        z_i = ai.GetAtomicNum()
-        z_j = aj.GetAtomicNum()
+        ai, aj = mol.GetAtomWithIdx(i), mol.GetAtomWithIdx(j)
 
         dist = _bond_distance(conf, i, j)
-        rsum = float(pt.GetRcovalent(z_i) + pt.GetRcovalent(z_j))
-        stretch = dist - rsum
 
-        oxygen_i_excl = oxygen_total[i] - (1 if z_j == 8 else 0)
-        oxygen_j_excl = oxygen_total[j] - (1 if z_i == 8 else 0)
-        heavy_i_excl = heavy_degree[i] - (1 if z_j != 1 else 0)
-        heavy_j_excl = heavy_degree[j] - (1 if z_i != 1 else 0)
+        # Look up bond boundaries (alphabetically ordered)
+        bond_type = "-".join(sorted([ai.GetSymbol(), aj.GetSymbol()]))
+        bounds = bond_boundaries.get(bond_type)
 
-        stretch_cutoff, oxygen_rich_ps_bridge, hypercoord_pp_bridge = (
-            _secondary_cleanup_stretch_cutoff(
-                z_i,
-                z_j,
-                bond.IsInRing(),
-                has_hetero_nbr[i],
-                has_hetero_nbr[j],
-                oxygen_i_excl,
-                oxygen_j_excl,
-                heavy_i_excl,
-                heavy_j_excl,
-            )
-        )
-        if stretch <= stretch_cutoff:
+        if bounds is None:
             continue
 
-        stretched.append(
-            (stretch, i, j, dist, oxygen_rich_ps_bridge, hypercoord_pp_bridge)
-        )
+        min_dist, max_dist = bounds["min"], bounds["max"]
+        bond_range = max_dist - min_dist
+        bottom_fraction = min_dist + fraction_bond_range * bond_range
+        top_fraction = max_dist - fraction_bond_range * bond_range
+
+        if dist < bottom_fraction or dist > top_fraction:
+            stretched.append((dist, i, j))
 
     return stretched
 
@@ -2956,13 +2897,33 @@ def _evaluate_secondary_bond_removal(
     mol: Mol,
     idx_a: int,
     idx_b: int,
-    stretch: float,
     dist: float,
     best_obj: Objective,
-    oxygen_rich_ps_bridge: bool,
-    hypercoord_pp_bridge: bool,
 ) -> tuple[Objective, float, int, int] | None:
-    """Return accepted trial update for one secondary bond-removal candidate."""
+    """Return accepted trial update for one secondary bond-removal candidate.
+
+    Removes the bond and scores the resulting structure. Accepts only if the
+    trial objective strictly improves (is less than) the current best.
+
+    Parameters
+    ----------
+    mol : rdkit.Chem.Mol
+        Molecule containing the bond to evaluate.
+    idx_a : int
+        Index of first atom in bond.
+    idx_b : int
+        Index of second atom in bond.
+    dist : float
+        Observed bond distance in Ångströms.
+    best_obj : Objective
+        Current best cleanup objective to beat.
+
+    Returns
+    -------
+    tuple or None
+        If removal improves objective: (new_objective, distance, idx_a, idx_b).
+        Returns ``None`` if removal creates over-valenced atoms or doesn't improve.
+    """
     trial = _trial_after_bond_removal(mol, idx_a, idx_b)
 
     # Skip removals that immediately create an obviously over-valenced
@@ -2972,13 +2933,7 @@ def _evaluate_secondary_bond_removal(
         return None
 
     trial_obj = _score_structure_for_cleanup(trial)
-    # For very stretched heavy-atom bonds, allow non-worsening removal even
-    # when charge objective does not strictly improve; these are frequently
-    # connectivity artefacts from distance-based initial perception.
-    keep_if_non_worse = (
-        oxygen_rich_ps_bridge or hypercoord_pp_bridge or stretch >= 0.17
-    ) and trial_obj <= best_obj
-    if trial_obj < best_obj or keep_if_non_worse:
+    if trial_obj < best_obj:
         return (trial_obj, dist, idx_a, idx_b)
 
     return None
@@ -3114,9 +3069,6 @@ def _fix_overvalenced(mol: Mol) -> Mol:
     best_obj = _score_structure_for_cleanup(best_struct)
 
     for _ in range(2):
-        heavy_degree, oxygen_total, has_hetero_nbr = _secondary_cleanup_features(
-            best_struct
-        )
         conf_best = (
             best_struct.GetConformer() if best_struct.GetNumConformers() > 0 else None
         )
@@ -3126,9 +3078,6 @@ def _fix_overvalenced(mol: Mol) -> Mol:
         # suspicious ones for speed.
         stretched = _collect_secondary_stretched_candidates(
             best_struct,
-            heavy_degree,
-            oxygen_total,
-            has_hetero_nbr,
             conf_best,
         )
 
@@ -3137,22 +3086,16 @@ def _fix_overvalenced(mol: Mol) -> Mol:
 
         stretched.sort(reverse=True)
         for (
-            stretch,
+            dist,
             i,
             j,
-            dist,
-            oxygen_rich_ps_bridge,
-            hypercoord_pp_bridge,
         ) in stretched[:8]:
             evaluated = _evaluate_secondary_bond_removal(
                 best_struct,
                 i,
                 j,
-                stretch,
                 dist,
                 best_obj,
-                oxygen_rich_ps_bridge,
-                hypercoord_pp_bridge,
             )
             if evaluated is None:
                 continue
@@ -4095,5 +4038,5 @@ def determine_bonds(
             raise ValueError("Inconsistent charge with target!")
 
     Chem.SanitizeMol(mol)
-
+    # Chem.AssignStereochemistry(mol, force=True)
     return mol

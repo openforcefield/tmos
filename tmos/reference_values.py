@@ -13,6 +13,8 @@ References include:
 
 from dataclasses import dataclass, field
 from typing import Any
+import json
+from pathlib import Path
 
 import numpy as np
 from rdkit import Chem
@@ -360,6 +362,51 @@ def is_transition_metal(symbol: str) -> bool:
         ``True`` when *symbol* is a transition metal supported by tmos.
     """
     return symbol in METALS and METALS[symbol].covalent_radius is not None
+
+
+def load_bond_boundaries() -> dict[str, dict[str, float]]:
+    """Load and cache the bond boundaries dictionary from tmos/data/bond_boundaries.json.
+
+    The JSON file maps bond type strings (e.g., "C-H", "Ag-Ag") to dictionaries
+    containing "min" and "max" bond distances in Ångströms.
+
+    Returns
+    -------
+    dict[str, dict[str, float]]
+        Dictionary keyed by bond type (e.g., "C-H") with values containing
+        "min" and "max" keys with float distances in Å.
+
+    Notes
+    -----
+    The result is cached at module load time; subsequent calls return the
+    cached dictionary without re-reading the file.
+
+    Examples
+    --------
+    >>> boundaries = load_bond_boundaries()
+    >>> c_h = boundaries.get("C-H")
+    >>> if c_h:
+    ...     print(f"C-H: {c_h['min']:.2f} to {c_h['max']:.2f} Å")
+    C-H: 0.87 to 1.32 Å
+    """
+    if load_bond_boundaries._cache is not None:
+        return load_bond_boundaries._cache
+
+    # Locate and load the JSON file
+    data_dir = Path(__file__).parent / "data"
+    json_path = data_dir / "bond_boundaries.json"
+
+    if not json_path.exists():
+        raise FileNotFoundError(f"Bond boundaries file not found: {json_path}")
+
+    with open(json_path, "r") as f:
+        load_bond_boundaries._cache = json.load(f)
+
+    return load_bond_boundaries._cache
+
+
+# Attach cache attribute to function
+load_bond_boundaries._cache: dict[str, dict[str, float]] | None = None
 
 
 bond_type_dict = {

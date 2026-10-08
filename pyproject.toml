@@ -84,7 +84,8 @@ where = ["."]
 # Ref https://setuptools.pypa.io/en/latest/userguide/datafiles.html#package-data
 [tool.setuptools.package-data]
 tmos = [
-    "py.typed"
+    "py.typed",
+    "data/bond_boundaries.json"
 ]
 
 [tool.versioningit]
